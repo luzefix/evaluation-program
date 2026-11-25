@@ -1,0 +1,85 @@
+{
+  "_comment": "Room-temperature literature lattice parameters (Angstrom). Orthorhombic perovskites in Pbnm setting (c is the long axis). 'normal' is the surface normal (hkl) in the listed cell, 'orders' are the allowed multiples n*(hkl) observed in a symmetric 2theta-omega scan, 'inplane' lists in-plane directions [uvw] with the divisor that converts the repeat length to a pseudocubic spacing. Override or extend in ~/.evaluation_program/substrates.json.",
+  "SrTiO3": {
+    "system": "cubic",
+    "lattice": {"a": 3.905},
+    "orientations": {
+      "(001)": {"normal": [0, 0, 1], "orders": [1, 2, 3, 4],
+                "inplane": [{"label": "[100]", "uvw": [1, 0, 0], "divisor": 1}]},
+      "(110)": {"normal": [1, 1, 0], "orders": [1, 2, 3],
+                "inplane": [{"label": "[001]", "uvw": [0, 0, 1], "divisor": 1},
+                            {"label": "[1-10]", "uvw": [1, -1, 0], "divisor": 1}]},
+      "(111)": {"normal": [1, 1, 1], "orders": [1, 2],
+                "inplane": [{"label": "[1-10]", "uvw": [1, -1, 0], "divisor": 1}]}
+    }
+  },
+  "LaAlO3": {
+    "system": "cubic",
+    "note": "rhombohedral R-3c, pseudocubic description",
+    "lattice": {"a": 3.790},
+    "orientations": {
+      "(001)pc": {"normal": [0, 0, 1], "orders": [1, 2, 3, 4],
+                  "inplane": [{"label": "[100]pc", "uvw": [1, 0, 0], "divisor": 1}]}
+    }
+  },
+  "LSAT": {
+    "system": "cubic",
+    "note": "(LaAlO3)0.3(Sr2AlTaO6)0.7, pseudocubic",
+    "lattice": {"a": 3.868},
+    "orientations": {
+      "(001)": {"normal": [0, 0, 1], "orders": [1, 2, 3, 4],
+                "inplane": [{"label": "[100]", "uvw": [1, 0, 0], "divisor": 1}]}
+    }
+  },
+  "MgO": {
+    "system": "cubic",
+    "note": "rock salt (fcc): only even 00l",
+    "lattice": {"a": 4.212},
+    "orientations": {
+      "(001)": {"normal": [0, 0, 1], "orders": [2, 4],
+                "inplane": [{"label": "[100]", "uvw": [1, 0, 0], "divisor": 1}]}
+    }
+  },
+  "NdGaO3": {
+    "system": "orthorhombic",
+    "note": "Pbnm",
+    "lattice": {"a": 5.4276, "b": 5.4979, "c": 7.7078},
+    "orientations": {
+      "(110)o": {"normal": [1, 1, 0], "orders": [1, 2, 3, 4],
+                 "inplane": [{"label": "[1-10]o", "uvw": [1, -1, 0], "divisor": 2},
+                             {"label": "[001]o", "uvw": [0, 0, 1], "divisor": 2}]},
+      "(001)o": {"normal": [0, 0, 2], "orders": [1, 2, 3, 4],
+                 "inplane": [{"label": "[110]o", "uvw": [1, 1, 0], "divisor": 2},
+                             {"label": "[1-10]o", "uvw": [1, -1, 0], "divisor": 2}]}
+    }
+  },
+  "DyScO3": {
+    "system": "orthorhombic",
+    "note": "Pbnm",
+    "lattice": {"a": 5.440, "b": 5.713, "c": 7.887},
+    "orientations": {
+      "(110)o": {"normal": [1, 1, 0], "orders": [1, 2, 3, 4],
+                 "inplane": [{"label": "[1-10]o", "uvw": [1, -1, 0], "divisor": 2},
+                             {"label": "[001]o", "uvw": [0, 0, 1], "divisor": 2}]}
+    }
+  },
+  "GdScO3": {
+    "system": "orthorhombic",
+    "note": "Pbnm",
+    "lattice": {"a": 5.4862, "b": 5.7499, "c": 7.9345},
+    "orientations": {
+      "(110)o": {"normal": [1, 1, 0], "orders": [1, 2, 3, 4],
+                 "inplane": [{"label": "[1-10]o", "uvw": [1, -1, 0], "divisor": 2},
+                             {"label": "[001]o", "uvw": [0, 0, 1], "divisor": 2}]}
+    }
+  },
+  "SrLaAlO4": {
+    "system": "tetragonal",
+    "note": "I4/mmm K2NiF4 type: only even 00l",
+    "lattice": {"a": 3.7564, "c": 12.636},
+    "orientations": {
+      "(001)": {"normal": [0, 0, 1], "orders": [2, 4, 6, 8, 10, 12, 14],
+                "inplane": [{"label": "[100]", "uvw": [1, 0, 0], "divisor": 1}]}
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "_comment": "Bulk film parameters for strain analysis (Angstrom). 'a' = in-plane bulk spacing, 'c' = out-of-plane bulk repeat in the same cell in which the (hkl) of the film reflections are given. Perovskites: pseudocubic cell (a = c). K2NiF4 cuprates: tetragonal I4/mmm cell (00l with even l). Poisson ratios are typical values; check them for your system. Override or extend in ~/.evaluation_program/films.json.",
+  "SrIrO3": {"a": 3.959, "c": 3.959, "poisson": 0.30, "cell": "pseudocubic",
+             "note": "orthorhombic Pbnm a=5.60, b=5.58, c=7.89"},
+  "SrRuO3": {"a": 3.930, "c": 3.930, "poisson": 0.33, "cell": "pseudocubic",
+             "note": "orthorhombic Pbnm a=5.567, b=5.530, c=7.845"},
+  "CaIrO3": {"a": 3.856, "c": 3.856, "poisson": 0.30, "cell": "pseudocubic",
+             "note": "perovskite polymorph, Pbnm a=5.35, b=5.59, c=7.67"},
+  "NdNiO3": {"a": 3.807, "c": 3.807, "poisson": 0.30, "cell": "pseudocubic",
+             "note": "orthorhombic Pbnm a=5.389, b=5.382, c=7.610"},
+  "La2CuO4": {"a": 3.803, "c": 13.150, "poisson": 0.30, "cell": "tetragonal",
+              "note": "orthorhombic Bmab a=5.355, b=5.401 -> a_t = sqrt(ab/2)"},
+  "La1.85Sr0.15CuO4": {"a": 3.7793, "c": 13.226, "poisson": 0.30, "cell": "tetragonal",
+                       "note": "LSCO x = 0.15; add other x as separate entries"}
+}

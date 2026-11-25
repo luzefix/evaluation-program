@@ -1,0 +1,145 @@
+# Evaluation Program
+
+Desktop application (Qt / PySide6) for evaluating thin-film measurements:
+growth and structural characterisation (XRD, RSM) and low-temperature transport.
+All analysis code lives in `evalprog.core` and can be used from scripts or
+notebooks without the GUI.
+
+| Tab | Status |
+| --- | --- |
+| XRD (symmetric 2θ-ω) | substrate database, automatic substrate peak fit, zero-shift and sample-height correction, film peaks, out-of-plane strain |
+| RSM | 2D pseudo-Voigt fits, substrate-based Δ2θ/Δω correction, in-/out-of-plane lattice, strain, relaxation |
+| R(T) | QD ETO / Resistivity option / Zurich lock-in (LabVIEW) files, T_c analysis, magnetic kinks, MIT, RRR, ρ and R_sheet |
+| R(H) / Harmonics, MPMS, Ellipsometry, AFM, TEM | planned |
+
+## Installation
+
+Python ≥ 3.10.
+
+```bash
+git clone <repo-url> evaluation-program
+cd evaluation-program
+python -m venv .venv
+# Windows: .venv\Scripts\activate    macOS/Linux: source .venv/bin/activate
+pip install -e .
+evalprog            # or: python -m evalprog   or: python run.py
+```
+
+In Spyder run `run.py` with "Execute in an external system terminal" (or set the
+graphics backend to Qt).
+
+### Stand-alone app
+
+```bash
+pip install pyinstaller
+pyinstaller evaluation_program.spec
+```
+
+The app is created in `dist/EvaluationProgram/` (Windows `EvaluationProgram.exe`,
+macOS `EvaluationProgram.app`). Build on the operating system you want to run it on.
+
+## XRD
+
+1. **Load scan**: `.xy` (two columns, as converted from `.xrdml`) or `.xrdml` directly.
+2. **Substrate**: choose substrate and orientation, *Find & fit substrate peaks*.
+   All allowed substrate reflections inside the scan range are located (± search
+   window around the calculated position) and the strongest ones (up to *Max. peaks*)
+   are fitted with a pseudo-Voigt Kα1/Kα2 doublet (Kα2 position from Bragg's law,
+   intensity ratio 0.5, optionally asymmetric) on a linear background. Poisson weights
+   (1/√I) are used. An extra peak (film peak, shoulder) inside the window is added
+   automatically when it improves the fit (BIC).
+3. **Correction**: Δ2θ = Z + D·cos θ.
+   * 1 peak → zero shift Z only;
+   * ≥ 2 peaks → Z and the sample-displacement term D. The sample height is
+     s = −D·R/2 (R = goniometer radius, 240 mm for the Empyrean).
+   The corrected axis is used for everything afterwards and can be saved as `.xy`.
+4. **Film peaks**: drag a range in the upper plot, set phase and (h k l), *Fit selected
+   range*. Substrate peaks inside the range are fitted simultaneously. The table gives
+   the corrected position, d and the out-of-plane lattice parameter; several reflections
+   of one phase are combined (weighted mean) and compared with the bulk value.
+
+## RSM
+
+1. **Load** `.xrdml` area scans or the PANalytical CSV export (`[Scan points]` block).
+2. **Substrate reference**: substrate, orientation, in-plane direction and (h k l)
+   of the measured substrate reflection (pseudocubic for perovskites, e.g. STO (1 0 3);
+   NdGaO3 (110)o uses pseudocubic indices with the [1-10]o or [001]o in-plane spacing).
+   *Find substrate peak & correct offset* fits the substrate peak and shifts 2θ and ω
+   so that it sits at the calculated position. A rectangle drawn around the
+   substrate can be used instead (*Use current ROI*).
+3. **Film peak**: drag a rectangle, set phase and (h k l) in the film cell, *Fit ROI*.
+   The fit is a rotated 2D pseudo-Voigt with a plane background:
+   * weighting *poisson* (default) or *log* (emphasises tails). *none* reproduces the
+     old unweighted fit, which is why its RMS was dominated by the peak top;
+   * the fitted substrate peak can be subtracted first, so a large ROI does not pull
+     the film peak towards the substrate;
+   * *robust loss* reduces the influence of streaks / detector artefacts.
+4. **Results**: a_ip = 2π√(h²+k²)/|Qx|, c = 2πl/Qz, strains against the bulk
+   values, relaxation R = (a_ip − a_sub)/(a_bulk − a_sub), the unstrained lattice
+   parameter from the Poisson ratio a_r = (c·a0/c0 + k·a_ip)/(1 + k), k = 2ν/(1−ν),
+   and the effective Poisson ratio ν_eff = ε_zz/(ε_zz − 2ε_xx). Selecting a row shows
+   Qx and Qz line cuts through the peak (data and fit).
+
+## R(T)
+
+* **Files**: QD MultiVu `.dat` (ETO channels, Resistivity option bridges), LabVIEW
+  lock-in files (instrument header with `I=`; each demodulator voltage → R = V/I) and
+  any delimited table with a header line. Several files/channels can be overlaid.
+* **Branch**: cooling / warming are separated automatically (time order).
+* **Quantity**: R, ρ (bar: ρ = R·w·t/L; van der Pauw: ρ = π t/ln2 · R · f), R_sheet,
+  R/R(300 K).
+* **Superconducting**: normal-state line fitted above the transition;
+  T_c,onset (90 %), T_c,mid (50 %), T_c,zero (1 %), onset from the tangent at T_mid,
+  ΔT_c (90–10 %), all thresholds adjustable.
+* **Magnetic / kinks**: most prominent extrema of dR/dT and d²R/dT² (Savitzky–Golay,
+  window adjustable), resistance minima/maxima.
+* **Metal–insulator**: T_MI from the extremum of d ln R/dT for both branches and the
+  hysteresis width; resistance minimum.
+* Click into the plot to add a manual marker. Results are collected in a table and
+  can be exported; curves are exported with Origin-style long-name/unit header lines.
+
+## Materials database
+
+Built-in tables: `src/evalprog/materials/data/substrates.json` and `films.json`.
+
+Substrates: SrTiO3 (001)/(110)/(111), LaAlO3 (001)pc, LSAT (001), MgO (001),
+NdGaO3 (110)o/(001)o, DyScO3 (110)o, GdScO3 (110)o, SrLaAlO4 (001).
+Films: SrIrO3, SrRuO3, CaIrO3, NdNiO3, La2CuO4, La1.85Sr0.15CuO4.
+
+The values are room-temperature literature values; Poisson ratios are typical
+numbers and should be checked for the respective system. To add or change entries
+without touching the code, use *Materials → Open user materials folder* and put
+entries with the same structure into `~/.evaluation_program/substrates.json` or
+`films.json`, then *Materials → Reload materials*.
+
+## Using the analysis without the GUI
+
+```python
+from evalprog import materials
+from evalprog.core.xrd.io import load_scan
+from evalprog.core.xrd.substrate import find_and_fit
+
+scan = load_scan("sample.xy")
+res = find_and_fit(scan.two_theta, scan.intensity, materials.get_substrate("SrTiO3", "(001)"))
+print(res.correction.describe())
+two_theta_corrected = res.correction.apply(scan.two_theta)
+```
+
+## Development
+
+```bash
+pip install -e .[dev]
+pytest
+```
+
+Tests use synthetic data (`tests/synth.py`). Real example files for each instrument
+should be added to `tests/data/` as they become available.
+
+## Roadmap
+
+* Port of the R(H) / higher-harmonics program as a tab
+* MPMS M(T), M(H)
+* Ellipsometry, AFM
+* GenX integration for XRR (run GenX fits / read `.hgx` results)
+* eLabFTW: upload results and figures to experiments via the REST API
+* Python control of the Zurich Instruments lock-ins (zhinst)
