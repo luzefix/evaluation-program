@@ -134,7 +134,20 @@ All results go to `<measurement folder>/output/` (CSV with Origin header lines) 
      differences* (terraces, large features: aligns each line to the previous one);
      mean / linear / quadratic per line;
   4. pits and particles (> n·σ) are masked and the fits of 2 and 3 repeated without them;
-  5. optional spike removal (median filter), zero level (median / minimum / mean).
+  5. optional spike removal (median filter), optional smoothing (Gaussian σ or median
+     window in nm; reduces noise for step heights, lowers Sq), zero level.
+  With *terraces* + *median of differences* the final line offsets and the terrace
+  slope are fitted jointly (z = c_terrace + r_line + a·x, edges excluded), so the line
+  offsets do not drift like a pure line-to-line alignment does on noisy images.
+* **Step heights of substrates** (e.g. BOE-terminated SrTiO3):
+  * *profile line* mode: drag across the steps; *profile width* averages along the step
+    edges (dashed band). The profile is fitted with a staircase
+    h = a + b·s + Σ H_k·Θ(s − e_k) (edge zones excluded, residual tilt b free):
+    every step height ± error, mean |step| ± std/√N, terrace width and miscut angle;
+  * *region* mode: drag a rectangle over a few clean terraces; the height histogram of
+    the region is fitted with one Gaussian per level, the level spacing gives the step
+    heights and a linear fit L = L0 + n·d over all levels gives one step height ± error
+    (n from the reference step, e.g. 0.3905 nm). Works also for meandering steps.
 * **Analysis**: Sq, Sa, Sz, Ssk, Sku (whole image and without masked features),
   correlation length (ACF = 1/e), height histogram with automatic level detection
   and step heights in units of a reference step (e.g. 0.3905 nm for SrTiO3),

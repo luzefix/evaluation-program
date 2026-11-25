@@ -82,3 +82,40 @@ def test_real_bruker_file():
     assert ch.unit == "nm" and ch.data.shape == (1024, 1024)
     r = afm.correct(ch.data)
     assert 0.5 < afm.roughness(r.z)["Sq"] < 5
+
+
+def _noisy_terraces():
+    rng = np.random.default_rng(5)
+    z, true = afm_terraces(n=512, size_nm=2000, scars=(), pits=0, row_sigma=0.05)
+    return z + rng.normal(0, 0.15, z.shape), true, 2000 / 512
+
+
+def test_noisy_terraces_histogram_with_smoothing():
+    z, true, dx = _noisy_terraces()
+    c = afm.Corrections(background="terraces (facet level)", rows="median of differences",
+                        smooth="gaussian", smooth_nm=8)
+    r = afm.correct(z, c, dx, dx)
+    lf = afm.fit_levels(afm.height_histogram(r.z, bins=400), 0.3905)
+    assert len(lf.centers) >= 6
+    assert lf.ladder["step"] == pytest.approx(0.3905, abs=0.005)
+    assert np.allclose(lf.steps, 0.3905, atol=0.02)
+
+
+def test_profile_staircase_fit():
+    z, true, dx = _noisy_terraces()
+    r = afm.correct(z, afm.Corrections(background="terraces (facet level)",
+                                       rows="median of differences"), dx, dx)
+    s, h = afm.line_profile(r.z, dx, dx, (50, 1000), (1950, 1000), width=40)
+    ps = afm.profile_steps(s, h, min_step=0.2, edge_exclusion_nm=60)
+    assert len(ps.heights) == 7
+    assert np.allclose(ps.heights, -0.3905, atol=0.02)
+    assert np.mean(ps.terraces) == pytest.approx(250, rel=0.05)
+
+
+def test_smoothing_keeps_levels():
+    z = np.zeros((100, 100))
+    z[:, 50:] = 1.0
+    zs = afm.smooth(z + np.random.default_rng(0).normal(0, 0.2, z.shape), "gaussian", 3.0, 1.0)
+    assert zs[:, :40].mean() == pytest.approx(0.0, abs=0.02)
+    assert zs[:, 60:].mean() == pytest.approx(1.0, abs=0.02)
+    assert zs[:, :40].std() < 0.05

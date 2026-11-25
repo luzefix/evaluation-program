@@ -129,3 +129,17 @@ def test_afm_tab(window, tmp_path):
     assert tab.features.summary["count"] >= 5
     tab.chk_showmask.setChecked(True)
     tab.plot.figure.savefig(tmp_path / "afm.png")
+    # step analysis: wide profile across the steps, then a region
+    tab.cb_smooth.setCurrentText("gaussian")
+    tab.sp_smooth.setValue(8.0)
+    tab.sp_width.setValue(10)
+    tab.sp_edge.setValue(60.0)
+    tab.set_profile((20.0, 300.0), (1980.0, 300.0))
+    ps = tab.prof_steps
+    assert len(ps.heights) >= 5
+    assert np.median(np.abs(ps.heights)) == pytest.approx(0.3905, abs=0.03)
+    tab.set_roi((300.0, 1000.0, 1100.0, 1900.0))
+    assert tab.levelfit is not None and len(tab.levelfit.centers) >= 2
+    assert tab.levelfit.ladder["step"] == pytest.approx(0.3905, abs=0.04)
+    tab.plot_hist.figure.savefig(tmp_path / "afm_hist.png")
+    tab.clear_roi()

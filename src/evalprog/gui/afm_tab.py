@@ -29,6 +29,10 @@ class AFMTab(QWidget):
         self.features = None
         self.hist = None
         self.profile = None         # (s, h, p0, p1)
+        self.prof_steps = None      # afm.ProfileSteps
+        self.levelfit = None        # afm.LevelFit
+        self.roi = None             # (x0, x1, y0, y1) in nm
+        self.results = []
         self._drag = None
         self._line = None
         self._build()
@@ -54,21 +58,26 @@ class AFMTab(QWidget):
         self.sp_mask = spin(2.5, 0.5, 20, 1, 0.5, " σ")
         self.chk_outl = QCheckBox("Remove spikes")
         self.sp_outl = spin(6.0, 1, 50, 1, 0.5, " σ")
+        self.cb_smooth = combo(afm.SMOOTHING)
+        self.sp_smooth = spin(5.0, 0.1, 1e4, 1, 1, " nm")
         self.cb_zero = combo(ZERO, "median")
         for w in (self.chk_scars, self.chk_mask, self.chk_outl):
             w.toggled.connect(self.apply)
-        for w in (self.sp_scar, self.sp_scar_len, self.sp_mask, self.sp_outl):
+        for w in (self.sp_scar, self.sp_scar_len, self.sp_mask, self.sp_outl, self.sp_smooth):
             w.valueChanged.connect(self.apply)
-        for w in (self.cb_bg, self.cb_rows, self.cb_zero):
+        for w in (self.cb_bg, self.cb_rows, self.cb_zero, self.cb_smooth):
             w.currentIndexChanged.connect(self.apply)
         lay.addWidget(group("Corrections (applied in this order)", [
             self.chk_scars, ("Scar threshold / min. length", hbox(self.sp_scar, self.sp_scar_len)),
             ("Background", self.cb_bg), ("Line alignment", self.cb_rows),
             self.chk_mask, ("Mask threshold", self.sp_mask),
-            self.chk_outl, ("Spike threshold", self.sp_outl), ("Zero level", self.cb_zero)]))
+            self.chk_outl, ("Spike threshold", self.sp_outl),
+            ("Smoothing (σ / window)", hbox(self.cb_smooth, self.sp_smooth)),
+            ("Zero level", self.cb_zero)]))
         lay.addWidget(info_label(
             "Terraces / step edges: use 'terraces (facet level)' and 'median of differences'. "
-            "Rough films and particles: 'plane' or 'polynomial 2' and 'median'."))
+            "Rough films and particles: 'plane' or 'polynomial 2' and 'median'. "
+            "Smoothing reduces noise for step heights but lowers Sq."))
 
         self.cb_cmap = combo(CMAPS)
         self.sp_lo = spin(1.0, 0, 49, 1, 0.5, " %")
@@ -82,17 +91,33 @@ class AFMTab(QWidget):
                                         ("Contrast (percentiles)", hbox(self.sp_lo, self.sp_hi)),
                                         self.chk_showmask]))
 
-        self.sp_width = ispin(3, 1, 200)
+        self.cb_mouse = combo(["profile line", "region (rectangle)"])
+        self.btn_clear_roi = QPushButton("Clear region")
+        self.btn_clear_roi.clicked.connect(self.clear_roi)
+        self.sp_width = ispin(3, 1, 5000)
+        self.sp_width.valueChanged.connect(self._width_changed)
         self.sp_ref = spin(0.3905, 0.01, 100, 4, 0.01, " nm")
         self.sp_bins = ispin(300, 20, 5000)
         self.sp_prom = spin(5.0, 0.5, 90, 1, 1, " %")
+        self.chk_relevel = QCheckBox("Re-level terraces inside region")
+        self.sp_minstep = spin(0.2, 0.001, 100, 3, 0.05, " nm")
+        self.sp_edge = spin(30.0, 0, 1e4, 1, 5, " nm")
         for w in (self.sp_ref, self.sp_bins, self.sp_prom):
             w.valueChanged.connect(self.analyse)
-        lay.addWidget(group("Profiles and steps", [
-            info_label("Drag a line in the image for a profile (toolbar zoom/pan off)."),
-            ("Profile width (px)", self.sp_width),
+        self.chk_relevel.toggled.connect(self.analyse)
+        for w in (self.sp_minstep, self.sp_edge):
+            w.valueChanged.connect(self._width_changed)
+        lay.addWidget(group("Steps and terraces", [
+            ("Mouse in image", hbox(self.cb_mouse, self.btn_clear_roi)),
+            info_label("Profile line: drag across the steps (perpendicular). The profile is "
+                       "averaged over 'width' pixels along the steps and fitted with a "
+                       "staircase. Region: the histogram and the level fit use only the "
+                       "rectangle (e.g. 2–4 clean terraces). Toolbar zoom/pan must be off."),
+            ("Profile width (px, along steps)", self.sp_width),
+            ("Min. step / edge exclusion", hbox(self.sp_minstep, self.sp_edge)),
             ("Reference step (unit cell)", self.sp_ref),
-            ("Histogram bins", self.sp_bins), ("Level detection: prominence", self.sp_prom)]))
+            ("Histogram bins", self.sp_bins), ("Level detection: prominence", self.sp_prom),
+            self.chk_relevel]))
 
         self.cb_kind = combo(["pits", "islands"])
         self.sp_thr = spin(1.0, 0.001, 1e4, 3, 0.1, " nm")
@@ -141,7 +166,7 @@ class AFMTab(QWidget):
 
         right = QSplitter(Qt.Vertical)
         right.addWidget(self.tabs)
-        self.table = ResultsTable(["Quantity", "Value", "Unit", "Note"])
+        self.table = ResultsTable(["Quantity", "Value", "±", "Unit", "Note"])
         right.addWidget(self.table)
         right.setSizes([700, 220])
         main = QHBoxLayout(self)
@@ -171,6 +196,8 @@ class AFMTab(QWidget):
         info = ", ".join(f"{k}: {v}" for k, v in hdr.items() if k in ("Date", "Microscope", "Scan Rate"))
         self.lbl_file.setText(f"{Path(path).name}\n{info}")
         self.profile = None
+        self.prof_steps = None
+        self.roi = None
         self.on_channel()
 
     def on_channel(self, *_):
@@ -186,13 +213,15 @@ class AFMTab(QWidget):
             scar_length=self.sp_scar_len.value(), background=self.cb_bg.currentText(),
             rows=self.cb_rows.currentText(), mask_features=self.chk_mask.isChecked(),
             mask_sigma=self.sp_mask.value(), outliers=self.chk_outl.isChecked(),
-            outlier_sigma=self.sp_outl.value(), zero=self.cb_zero.currentText())
+            outlier_sigma=self.sp_outl.value(), smooth=self.cb_smooth.currentText(),
+            smooth_nm=self.sp_smooth.value(), zero=self.cb_zero.currentText())
 
     def apply(self, *_):
         if self.channel is None:
             return
         try:
-            self.result = afm.correct(self.channel.data, self.corrections())
+            self.result = afm.correct(self.channel.data, self.corrections(), self.channel.dx,
+                                      self.channel.dy)
         except Exception as exc:
             show_error(self, "AFM corrections", exc)
             return
@@ -203,6 +232,18 @@ class AFMTab(QWidget):
         self.analyse()
 
     # --------------------------------------------------------------- analysis
+    def analysis_image(self):
+        """Corrected image, or the selected region of it."""
+        z = self.result.z
+        if self.roi is None:
+            return z
+        sub = afm.crop(z, self.channel.dx, self.channel.dy, self.roi)
+        if sub.size < 16:
+            return z
+        if self.chk_relevel.isChecked():
+            sub = afm.level_terraces(sub)
+        return sub
+
     def analyse(self, *_):
         if self.result is None:
             return
@@ -213,32 +254,66 @@ class AFMTab(QWidget):
         rm = afm.roughness(z, self.result.mask) if self.result.mask.any() else None
         for k, note in (("Sq", "RMS roughness"), ("Sa", "mean abs. deviation"), ("Sz", "peak to valley"),
                         ("Ssk", "skewness (<0: pits dominate)"), ("Sku", "kurtosis (3 = Gaussian)")):
-            rows.append((k, r[k], "" if k in ("Ssk", "Sku") else u, note))
+            rows.append((k, r[k], "", "" if k in ("Ssk", "Sku") else u, note))
         if rm is not None:
-            rows.append(("Sq (without excluded features)", rm["Sq"], u, "terrace / matrix roughness"))
+            rows.append(("Sq (without excluded features)", rm["Sq"], "", u, "terrace / matrix roughness"))
         try:
-            rows.append(("Correlation length (fast axis)", afm.correlation_length(z, ch.dx), "nm", "ACF = 1/e"))
+            rows.append(("Correlation length (fast axis)", afm.correlation_length(z, ch.dx), "", "nm",
+                         "ACF = 1/e"))
         except Exception:
             pass
-        self.hist = afm.height_histogram(z, bins=self.sp_bins.value(), prominence=self.sp_prom.value() / 100)
         ref = self.sp_ref.value()
-        for i, lv in enumerate(self.hist.levels):
-            rows.append((f"Level {i + 1}", lv, u, f"rel. weight {self.hist.level_weights[i]:.2f}"))
-        for i, st in enumerate(self.hist.steps):
-            rows.append((f"Step {i + 1}→{i + 2}", st, u, f"= {st / ref:.2f} × reference"))
-        if self.features is not None:
-            s = self.features.summary
-            rows.append((f"{self.features.kind}: count", s["count"], "", f"threshold {self.features.threshold:g} {u}"))
-            rows.append((f"{self.features.kind}: density", s["density_um2"], "µm⁻²", ""))
-            rows.append((f"{self.features.kind}: area fraction", 100 * s["area_fraction"], "%", ""))
-            if "mean_d_eq_nm" in s:
-                rows.append((f"{self.features.kind}: mean diameter", s["mean_d_eq_nm"], "nm", "equivalent disc"))
-                rows.append((f"{self.features.kind}: mean depth/height", s["mean_extreme_nm"], u, "vs. reference level"))
-                rows.append((f"{self.features.kind}: max depth/height", s["max_extreme_nm"], u, ""))
+        za = self.analysis_image()
+        where = "region" if za is not z else "whole image"
+        self.hist = afm.height_histogram(za, bins=self.sp_bins.value(), prominence=self.sp_prom.value() / 100)
+        self.levelfit = afm.fit_levels(self.hist, ref) if len(self.hist.levels) else None
+        lf = self.levelfit
+        if lf is not None:
+            for i, (c, e, w) in enumerate(zip(lf.centers, lf.errors, lf.widths)):
+                rows.append((f"Level {i + 1}", c, e, u, f"{where}, Gaussian fit, σ = {w:.3f} {u}"))
+            for i, (st, e) in enumerate(zip(lf.steps, lf.step_errors)):
+                rows.append((f"Step {i + 1}→{i + 2} (histogram)", st, e, u, f"= {st / ref:.2f} × reference"))
+            if lf.ladder:
+                d, e = lf.ladder["step"], lf.ladder["error"]
+                rows.append(("Step height, all levels (histogram)", d, e, u,
+                             f"= {d / ref:.3f} × reference; linear fit L = L0 + n·d"))
+        else:
+            for i, lv in enumerate(self.hist.levels):
+                rows.append((f"Level {i + 1}", lv, "", u, where))
         if self.profile is not None:
             s_, h_ = self.profile[0], self.profile[1]
-            rows.append(("Profile length", s_[-1], "nm", ""))
-            rows.append(("Profile peak-to-valley", float(np.ptp(h_)), u, ""))
+            rows.append(("Profile length", s_[-1], "", "nm", f"width {self.sp_width.value()} px"))
+            ps = self.prof_steps
+            if ps is not None and len(ps.heights):
+                for k, (e_, hgt, err) in enumerate(zip(ps.edges, ps.heights, ps.errors)):
+                    rows.append((f"Profile step {k + 1} at {e_:.0f} nm", hgt, err, u,
+                                 f"= {hgt / ref:.2f} × reference"))
+                hs = np.abs(ps.heights)
+                n = len(hs)
+                sem = hs.std(ddof=1) / np.sqrt(n) if n > 1 else float(ps.errors[0])
+                rows.append(("Mean |step| (profile)", hs.mean(), sem, u,
+                             f"{n} steps, ± = std/√N; = {hs.mean() / ref:.3f} × reference"))
+                if len(ps.terraces):
+                    tw = ps.terraces.mean()
+                    tw_e = ps.terraces.std(ddof=1) / np.sqrt(len(ps.terraces)) if len(ps.terraces) > 1 else np.nan
+                    rows.append(("Mean terrace width (profile)", tw, tw_e, "nm", "profile ⟂ steps"))
+                    if u == "nm":
+                        ang = np.degrees(np.arctan(hs.mean() / tw))
+                        rows.append(("Miscut angle", ang, "", "deg", "atan(step / terrace width)"))
+                rows.append(("Profile fit: residual RMS", ps.residual_rms, "", u,
+                             f"residual slope {ps.slope * 1e3:.3g} {u}/µm"))
+            else:
+                rows.append(("Profile peak-to-valley", float(np.ptp(h_)), "", u, "no steps found"))
+        if self.features is not None:
+            s = self.features.summary
+            k = self.features.kind
+            rows.append((f"{k}: count", s["count"], "", "", f"threshold {self.features.threshold:g} {u}"))
+            rows.append((f"{k}: density", s["density_um2"], "", "µm⁻²", ""))
+            rows.append((f"{k}: area fraction", 100 * s["area_fraction"], "", "%", ""))
+            if "mean_d_eq_nm" in s:
+                rows.append((f"{k}: mean diameter", s["mean_d_eq_nm"], "", "nm", "equivalent disc"))
+                rows.append((f"{k}: mean depth/height", s["mean_extreme_nm"], "", u, "vs. reference level"))
+                rows.append((f"{k}: max depth/height", s["max_extreme_nm"], "", u, ""))
         self.results = rows
         self.table.set_rows(rows)
         self.redraw()
@@ -258,9 +333,12 @@ class AFMTab(QWidget):
                                    r["extreme_nm"], r["volume_nm3"]) for r in self.features.table])
         self.analyse()
 
-    # --------------------------------------------------------------- profile
+    # --------------------------------------------------------------- mouse: profile / region
     def _toolbar_idle(self):
         return not str(self.plot.toolbar.mode)
+
+    def _region_mode(self):
+        return self.cb_mouse.currentIndex() == 1
 
     def _press(self, ev):
         if ev.inaxes is self.ax_img and ev.button == 1 and self._toolbar_idle() and self.result is not None:
@@ -270,10 +348,12 @@ class AFMTab(QWidget):
         if self._drag is None or ev.inaxes is not self.ax_img:
             return
         x0, y0 = self._drag
+        x1, y1 = ev.xdata, ev.ydata
+        xs, ys = ([x0, x1, x1, x0, x0], [y0, y0, y1, y1, y0]) if self._region_mode() else ([x0, x1], [y0, y1])
         if self._line is None:
-            (self._line,) = self.ax_img.plot([x0, ev.xdata], [y0, ev.ydata], "c-", lw=1.5)
+            (self._line,) = self.ax_img.plot(xs, ys, "c-", lw=1.5)
         else:
-            self._line.set_data([x0, ev.xdata], [y0, ev.ydata])
+            self._line.set_data(xs, ys)
         self.plot.draw()
 
     def _release(self, ev):
@@ -287,16 +367,38 @@ class AFMTab(QWidget):
         if np.hypot(p1[0] - p0[0], p1[1] - p0[1]) < 1e-3 * self.channel.width_nm / 1e3:
             return
         # axes are in µm
-        self.set_profile((p0[0] * 1e3, p0[1] * 1e3), (p1[0] * 1e3, p1[1] * 1e3))
+        if self._region_mode():
+            self.set_roi((p0[0] * 1e3, p1[0] * 1e3, p0[1] * 1e3, p1[1] * 1e3))
+        else:
+            self.set_profile((p0[0] * 1e3, p0[1] * 1e3), (p1[0] * 1e3, p1[1] * 1e3))
+
+    def set_roi(self, roi_nm):
+        x0, x1 = sorted(roi_nm[:2])
+        y0, y1 = sorted(roi_nm[2:])
+        self.roi = (x0, x1, y0, y1)
+        self.analyse()
+
+    def clear_roi(self):
+        self.roi = None
+        self.analyse()
 
     def set_profile(self, p0_nm, p1_nm):
         self._compute_profile(p0_nm, p1_nm)
         self.analyse()
 
+    def _width_changed(self, *_):
+        if self.profile is not None and self.result is not None:
+            self._compute_profile(self.profile[2], self.profile[3])
+            self.analyse()
+
     def _compute_profile(self, p0, p1):
         s, h = afm.line_profile(self.result.z, self.channel.dx, self.channel.dy, p0, p1,
                                 width=self.sp_width.value())
         self.profile = (s, h, p0, p1)
+        try:
+            self.prof_steps = afm.profile_steps(s, h, self.sp_minstep.value(), self.sp_edge.value())
+        except Exception:
+            self.prof_steps = None
 
     # --------------------------------------------------------------- drawing
     def redraw(self, *_):
@@ -325,13 +427,30 @@ class AFMTab(QWidget):
         self.ax_img.set_ylabel("y (µm)")
         self.ax_img.set_title(f"{self.file.path.stem}\n{ch.label}", fontsize=8)
         self.ax_prof.clear()
+        if self.roi is not None:
+            x0, x1, y0, y1 = (v / 1e3 for v in self.roi)
+            self.ax_img.plot([x0, x1, x1, x0, x0], [y0, y0, y1, y1, y0], "-", color="lime", lw=1.2)
         if self.profile is not None:
             s, h, p0, p1 = self.profile
             self.ax_img.plot([p0[0] / 1e3, p1[0] / 1e3], [p0[1] / 1e3, p1[1] / 1e3], "c-", lw=1.2)
             self.ax_img.plot([p0[0] / 1e3], [p0[1] / 1e3], "co", ms=4)
-            self.ax_prof.plot(s, h, "k-", lw=1)
-            for lv in (self.hist.levels if self.hist is not None else []):
-                self.ax_prof.axhline(lv, color="tab:red", lw=0.5, ls=":")
+            wpx = self.sp_width.value()
+            L = np.hypot(p1[0] - p0[0], p1[1] - p0[1])
+            if wpx > 1 and L > 0:
+                half = 0.5 * wpx * min(ch.dx, ch.dy)
+                nx_, ny_ = -(p1[1] - p0[1]) / L * half, (p1[0] - p0[0]) / L * half
+                bx = [p0[0] + nx_, p1[0] + nx_, p1[0] - nx_, p0[0] - nx_, p0[0] + nx_]
+                by = [p0[1] + ny_, p1[1] + ny_, p1[1] - ny_, p0[1] - ny_, p0[1] + ny_]
+                self.ax_img.plot(np.array(bx) / 1e3, np.array(by) / 1e3, "c--", lw=0.8)
+            self.ax_prof.plot(s, h, "k-", lw=1, label="profile")
+            ps = self.prof_steps
+            if ps is not None and len(ps.heights):
+                self.ax_prof.plot(s, ps.model, "-", color="tab:red", lw=1, label="staircase fit")
+                for e_, hgt in zip(ps.edges, ps.heights):
+                    self.ax_prof.axvline(e_, color="tab:red", lw=0.5, ls=":")
+                    self.ax_prof.annotate(f"{hgt:+.3f}", (e_, np.interp(e_, s, ps.model)), fontsize=7,
+                                          color="tab:red", xytext=(3, 3), textcoords="offset points")
+                self.ax_prof.legend(loc="best", fontsize=7)
             self.ax_prof.set_xlabel("distance (nm)")
             self.ax_prof.set_ylabel(f"height ({ch.unit})")
         else:
@@ -346,16 +465,25 @@ class AFMTab(QWidget):
             hst = self.hist
             w = hst.centers[1] - hst.centers[0]
             a.bar(hst.centers, hst.counts, width=w, color="0.7", label="histogram")
-            a.plot(hst.centers, hst.smooth, "k-", lw=1, label="smoothed")
-            for i, lv in enumerate(hst.levels):
+            lf = self.levelfit
+            levels = lf.centers if lf is not None else hst.levels
+            if lf is not None:
+                a.plot(hst.centers, lf.model, "k-", lw=1, label="Gaussian fit")
+            else:
+                a.plot(hst.centers, hst.smooth, "k-", lw=1, label="smoothed")
+            for lv in levels:
                 a.axvline(lv, color="tab:red", lw=0.8)
                 a.text(lv, a.get_ylim()[1] * 0.95, f" {lv:.3f}", color="tab:red", va="top", fontsize=8)
             a.set_xlabel(f"height ({ch.unit})")
             a.set_ylabel("counts")
             ref = self.sp_ref.value()
-            if len(hst.steps):
-                a.set_title("steps: " + ", ".join(f"{s:.3f} {ch.unit} ({s / ref:.2f} u.c.)" for s in hst.steps))
-            a.legend(loc="upper left")
+            where = "region" if self.roi is not None else "whole image"
+            if lf is not None and lf.ladder:
+                a.set_title(f"{where}: step = {lf.ladder['step']:.4f} ± {lf.ladder['error']:.4f} {ch.unit} "
+                            f"({lf.ladder['step'] / ref:.3f} u.c.)")
+            elif len(hst.steps):
+                a.set_title(f"{where}: steps " + ", ".join(f"{s:.3f}" for s in hst.steps) + f" {ch.unit}")
+            a.legend(loc="best")
         self.plot_hist.draw()
 
         a = self.ax_psd
@@ -396,19 +524,29 @@ class AFMTab(QWidget):
             with open(p, "w", encoding="utf-8") as fh:
                 fh.write(f"# profile from ({p0[0]:.1f}, {p0[1]:.1f}) nm to ({p1[0]:.1f}, {p1[1]:.1f}) nm, "
                          f"width {self.sp_width.value()} px\n")
-                fh.write(f"Distance,Height\nnm,{self.channel.unit}\n")
-                np.savetxt(fh, np.c_[s, h], delimiter=",", fmt="%.6g")
+                if self.prof_steps is not None and len(self.prof_steps.heights):
+                    fh.write(f"Distance,Height,Staircase fit\nnm,{self.channel.unit},{self.channel.unit}\n")
+                    np.savetxt(fh, np.c_[s, h, self.prof_steps.model], delimiter=",", fmt="%.6g")
+                else:
+                    fh.write(f"Distance,Height\nnm,{self.channel.unit}\n")
+                    np.savetxt(fh, np.c_[s, h], delimiter=",", fmt="%.6g")
 
     def on_save_results(self):
         if self.result is None:
             return
         p = save_file(self, "Save results", self._out_dir() / f"{self._stem()}_results.csv", "CSV (*.csv)")
         if p:
-            df = pd.DataFrame(self.results, columns=["Quantity", "Value", "Unit", "Note"])
+            df = pd.DataFrame(self.results, columns=["Quantity", "Value", "Error", "Unit", "Note"])
             c = self.corrections()
             with open(p, "w", encoding="utf-8", newline="") as fh:
                 fh.write(f"# file: {self.file.path.name}, channel: {self.channel.label}\n")
                 fh.write(f"# corrections: {c}\n")
+                if self.roi is not None:
+                    fh.write("# histogram region (nm): x %.0f-%.0f, y %.0f-%.0f\n" % self.roi)
+                if self.profile is not None:
+                    p0, p1 = self.profile[2], self.profile[3]
+                    fh.write(f"# profile ({p0[0]:.0f}, {p0[1]:.0f}) -> ({p1[0]:.0f}, {p1[1]:.0f}) nm, "
+                             f"width {self.sp_width.value()} px\n")
                 df.to_csv(fh, index=False)
             if self.features is not None and self.features.table:
                 pd.DataFrame(self.features.table).to_csv(

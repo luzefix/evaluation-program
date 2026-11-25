@@ -330,28 +330,110 @@ def _inlier_mean(g, nsigma=3.0):
     return float(g[ok].mean()) if ok.any() else float(med)
 
 
-def level_terraces(z, mask=None, iterations=4):
-    """Facet levelling: remove the plane whose slope equals the typical local slope
-    (mean gradient after rejecting step edges). On vicinal (stepped) surfaces the
-    terraces dominate the area, so this is the terrace inclination and the terraces end up horizontal, while
-    a least-squares plane would tilt them by the miscut."""
-    z = z.copy()
+def _terrace_slopes(z, ok, min_px=50):
+    """Common slope of all terraces: least squares z = a·x + b·y + c_k with an own
+    offset c_k for every connected terrace region (``ok`` = pixels away from step
+    edges). Unlike a gradient average it is not biased by left-over edge pixels."""
+    lab, n = ndimage.label(ok)
+    if n == 0:
+        return None, None
+    idx = np.arange(1, n + 1)
+    cnt = ndimage.sum(np.ones_like(z), lab, idx)
+    good = np.zeros(n + 1, bool)
+    good[1:] = cnt >= min_px
+    sel = good[lab]
+    if sel.sum() < 100:
+        return None, None
+    ny, nx = z.shape
+    y, x = np.mgrid[:ny, :nx].astype(float)
+    def demean(v):
+        m = np.zeros(n + 1)
+        m[1:] = ndimage.mean(v, lab, idx)
+        return (v - m[lab])[sel]
+    A = np.c_[demean(x), demean(y)]
+    c, *_ = np.linalg.lstsq(A, demean(z), rcond=None)
+    return float(c[0]), float(c[1])
+
+
+def level_terraces(z, mask=None, iterations=4, smooth_px=2.0, edge_sigma=2.0, fit_rows=False):
+    """Facet levelling: remove the plane whose slope equals the slope of the
+    terraces. On vicinal (stepped) surfaces the terraces end up horizontal, while a
+    least-squares plane would tilt them by the miscut angle.
+
+    The terrace slope is the mean gradient of a smoothed copy outside the step
+    edges; edges are pixels whose gradient magnitude deviates by > edge_sigma·σ from
+    the typical value, dilated by the smoothing width so that their tails are also
+    excluded (otherwise noisy images give a slope biased towards the miscut).
+
+    ``fit_rows``: also determine the line offsets from the terraces (see
+    ``_terrace_row_offsets``)."""
+    z = np.array(z, float)
     ny, nx = z.shape
     y, x = np.mgrid[:ny, :nx]
+    grow = max(1, int(round(3 * smooth_px)))
     for _ in range(iterations):
-        gx = np.diff(z, axis=1)
-        gy = np.diff(z, axis=0)
+        zs = ndimage.gaussian_filter(z, smooth_px, mode="nearest") if smooth_px else z
+        gy, gx = np.gradient(zs)
+        gx0, gy0 = np.median(gx), np.median(gy)
+        mag = np.hypot(gx - gx0, gy - gy0)
+        edge = mag > np.median(mag) + edge_sigma * (robust_sigma(mag) or 1e-12)
+        edge = ndimage.binary_dilation(edge, iterations=grow)
+        ok = ~edge
         if mask is not None:
-            gx = np.where(mask[:, 1:] | mask[:, :-1], np.nan, gx)
-            gy = np.where(mask[1:, :] | mask[:-1, :], np.nan, gy)
-        sx = _inlier_mean(gx)
-        sy = _inlier_mean(gy)
-        if not np.isfinite(sx) or not np.isfinite(sy):
-            break
+            ok &= ~mask
+        if ok.sum() < 0.05 * z.size:
+            ok = np.ones_like(ok) if mask is None else ~mask
+        sx, sy = _terrace_slopes(z, ok)
+        if sx is None:
+            sx, sy = float(np.mean(gx[ok])), float(np.mean(gy[ok]))
         z -= sx * x + sy * y
         if abs(sx) < 1e-9 and abs(sy) < 1e-9:
             break
+    if fit_rows:
+        z = _terrace_row_offsets(z, ok)
     return z - np.nanmedian(z)
+
+
+def _terrace_row_offsets(z, ok, min_px=50, max_points=300_000):
+    """Joint least-squares fit z = c_k(terrace) + r_i(line) + a·x on the pixels away
+    from step edges (sparse solver). Line offsets referenced to whole terraces do
+    not accumulate noise the way the line-to-line 'median of differences' does,
+    which is a random walk over the image."""
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.linalg import lsqr
+
+    lab, n = ndimage.label(ok)
+    if n == 0:
+        return z
+    cnt = np.bincount(lab.ravel(), minlength=n + 1)
+    keep = cnt >= min_px
+    keep[0] = False
+    sel = keep[lab]
+    if sel.mean() < 0.2:
+        return z
+    ny, nx = z.shape
+    ii, jj = np.nonzero(sel)
+    if ii.size > max_points:
+        pick = np.random.default_rng(0).choice(ii.size, max_points, replace=False)
+        ii, jj = ii[pick], jj[pick]
+    remap = -np.ones(n + 1, int)
+    remap[keep] = np.arange(keep.sum())
+    k = remap[lab[ii, jj]]
+    nk = int(keep.sum())
+    m = ii.size
+    xs = (jj - nx / 2) / nx
+    rows = np.concatenate([np.arange(m)] * 3)
+    cols = np.concatenate([k, nk + ii, np.full(m, nk + ny)])
+    vals = np.concatenate([np.ones(m), np.ones(m), xs])
+    A = coo_matrix((vals, (rows, cols)), shape=(m, nk + ny + 1)).tocsr()
+    sol = lsqr(A, z[ii, jj], damp=1e-6, atol=1e-10, btol=1e-10, iter_lim=5000)[0]
+    r = sol[nk:nk + ny]
+    a = sol[-1] / nx
+    seen = np.zeros(ny, bool)
+    seen[np.unique(ii)] = True
+    if not seen.all():  # lines without terrace pixels: interpolate
+        r[~seen] = np.interp(np.flatnonzero(~seen), np.flatnonzero(seen), r[seen])
+    return z - r[:, None] - a * (np.arange(nx) - nx / 2)[None, :]
 
 
 ROW_METHODS = ("median", "median of differences", "mean", "linear", "quadratic")
@@ -377,6 +459,15 @@ def align_rows(z, method="median", mask=None):
         off = np.nanmean(zm, axis=1)
         return z - np.nan_to_num(off)[:, None]
     if method == "median of differences":
+        # ignore step edges (from the fast-axis gradient, which line offsets do not
+        # affect): an edge that shifts slightly from line to line would otherwise
+        # bias every difference a little and the offsets would drift
+        g = np.gradient(ndimage.gaussian_filter1d(np.nan_to_num(z), 2.0, axis=1), axis=1)
+        g = g - np.median(g)
+        edge = np.abs(g) > 3 * (robust_sigma(g) or 1e-12)
+        edge = ndimage.binary_dilation(edge, structure=np.ones((3, 9), bool))
+        if (~edge).mean() > 0.3:
+            zm = np.where(edge, np.nan, zm)
         d = np.nanmedian(zm[1:] - zm[:-1], axis=1)
         d = np.nan_to_num(d)
         off = np.concatenate([[0.0], np.cumsum(d)])
@@ -466,6 +557,24 @@ def set_zero(z, mode="minimum"):
     raise ValueError(mode)
 
 
+SMOOTHING = ("none", "gaussian", "median")
+
+
+def smooth(z, method="gaussian", size_nm=5.0, dx=1.0, dy=None):
+    """Noise reduction. ``gaussian``: σ = size_nm (keeps terrace levels, broadens
+    step edges by ~σ); ``median``: window of size_nm (keeps edges sharper, removes
+    spikes). Smoothing lowers Sq – use it for step heights, not for roughness."""
+    dy = dy or dx
+    if method == "gaussian":
+        return ndimage.gaussian_filter(z, (size_nm / dy, size_nm / dx), mode="nearest")
+    if method == "median":
+        size = (max(1, int(round(size_nm / dy)) | 1), max(1, int(round(size_nm / dx)) | 1))
+        return ndimage.median_filter(z, size=size, mode="nearest")
+    if method in ("none", None, ""):
+        return z
+    raise ValueError(method)
+
+
 BACKGROUNDS = ("none", "plane", "polynomial 2", "polynomial 3", "terraces (facet level)")
 
 
@@ -481,6 +590,8 @@ class Corrections:
     mask_sigma: float = 2.5
     outliers: bool = False
     outlier_sigma: float = 6.0
+    smooth: str = "none"            # 'none', 'gaussian', 'median'
+    smooth_nm: float = 0.0          # Gaussian σ or median window (nm)
     zero: str = "median"
 
 
@@ -493,10 +604,11 @@ class Corrected:
     log: list
 
 
-def correct(z, c: Corrections = Corrections()) -> Corrected:
+def correct(z, c: Corrections = Corrections(), dx=None, dy=None) -> Corrected:
     """Standard order: background + line alignment → scars (detected on the levelled
     image, where line offsets no longer hide them) → background + line alignment
-    again with a mask of pits/particles → spikes → zero."""
+    again with a mask of pits/particles → spikes → smoothing → zero.
+    ``dx``, ``dy`` (nm/pixel) are needed for smoothing only."""
     z = np.array(z, float)
     log = []
 
@@ -506,6 +618,12 @@ def correct(z, c: Corrections = Corrections()) -> Corrected:
         elif c.background.startswith("polynomial"):
             z = level_polynomial(z, int(c.background.split()[-1]), mask)
         elif c.background.startswith("terraces"):
+            if c.rows and c.rows != "none":
+                # line offsets would otherwise look like step edges in dz/dy
+                z = align_rows(z, c.rows, mask)
+            if c.rows == "median of differences":
+                # final line offsets referenced to the terraces (no random walk)
+                return level_terraces(z, mask, fit_rows=True)
             z = level_terraces(z, mask)
         if c.rows and c.rows != "none":
             z = align_rows(z, c.rows, mask)
@@ -537,6 +655,9 @@ def correct(z, c: Corrections = Corrections()) -> Corrected:
     if c.outliers:
         z, outl = remove_outliers(z, c.outlier_sigma)
         log.append(f"outliers: {int(outl.sum())} px")
+    if c.smooth != "none" and c.smooth_nm > 0 and dx:
+        z = smooth(z, c.smooth, c.smooth_nm, dx, dy or dx)
+        log.append(f"smoothing: {c.smooth}, {c.smooth_nm:g} nm")
     z = set_zero(z, c.zero)
     return Corrected(z=z, mask=mask, scars=scars, outliers=outl, log=log)
 
@@ -723,3 +844,153 @@ def find_features(z, dx, dy, threshold, kind="pits", reference=None, min_pixels=
                      "mean_extreme_nm": float(np.mean([r["extreme_nm"] for r in rows])),
                      "max_extreme_nm": float((min if kind == "pits" else max)(r["extreme_nm"] for r in rows))})
     return Features(kind, ref, threshold, lab, rows, summ)
+
+
+# --------------------------------------------------------------------------- steps
+
+
+def crop(z, dx, dy, roi):
+    """Sub-image for roi = (x0, x1, y0, y1) in nm (y from the top row)."""
+    x0, x1 = sorted(roi[:2])
+    y0, y1 = sorted(roi[2:])
+    j0, j1 = int(np.floor(x0 / dx)), int(np.ceil(x1 / dx))
+    i0, i1 = int(np.floor(y0 / dy)), int(np.ceil(y1 / dy))
+    ny, nx = z.shape
+    return z[max(0, i0):min(ny, i1), max(0, j0):min(nx, j1)]
+
+
+def _gauss_sum(x, *p):
+    y = np.full_like(x, p[-1])
+    for k in range(0, len(p) - 1, 3):
+        a, c, w = p[k:k + 3]
+        y = y + a * np.exp(-0.5 * ((x - c) / w) ** 2)
+    return y
+
+
+@dataclass
+class LevelFit:
+    centers: np.ndarray
+    errors: np.ndarray        # 1σ fit uncertainty of the centres
+    widths: np.ndarray        # Gaussian σ of each level (terrace roughness + noise)
+    amplitudes: np.ndarray
+    steps: np.ndarray
+    step_errors: np.ndarray
+    model: np.ndarray         # fitted histogram
+    ladder: dict              # equidistant fit: step, error, n per level
+
+
+def fit_levels(hist: Histogram, reference_step=None) -> LevelFit | None:
+    """Fit a sum of Gaussians (one per detected level) to the height histogram.
+    The centres are the terrace heights; neighbouring differences are the step
+    heights. If ``reference_step`` is given, every level is assigned an integer
+    number of steps n (rounded) and a weighted straight line L = L0 + n·d gives one
+    mean step height d from all levels (robust against a missing level)."""
+    from scipy.optimize import curve_fit
+
+    x, y = hist.centers, hist.counts.astype(float)
+    if len(hist.levels) == 0:
+        return None
+    bw = x[1] - x[0]
+    sep = np.min(np.diff(hist.levels)) if len(hist.levels) > 1 else (x[-1] - x[0]) / 4
+    p0, lo, hi = [], [], []
+    for lv in hist.levels:
+        a0 = float(np.interp(lv, x, hist.smooth))
+        p0 += [a0, lv, max(sep / 4, 2 * bw)]
+        lo += [0, lv - sep / 2, bw / 2]
+        hi += [np.inf, lv + sep / 2, sep * 2]
+    p0.append(0.0)
+    lo.append(0.0)
+    hi.append(max(y.max(), 1.0))
+    sig = np.sqrt(np.maximum(y, 1.0))
+    p0 = np.clip(p0, np.array(lo) + 1e-12, np.where(np.isfinite(hi), np.array(hi) - 1e-12, np.inf))
+    try:
+        p, cov = curve_fit(_gauss_sum, x, y, p0=p0, bounds=(lo, hi), sigma=sig, maxfev=50000,
+                           x_scale="jac")
+        err = np.sqrt(np.clip(np.diag(cov), 0, None))
+    except Exception:
+        # fall back to independent fits of each peak within ± half the level spacing
+        p, err = [], []
+        for k, lv in enumerate(hist.levels):
+            sel = np.abs(x - lv) < sep / 2
+            try:
+                pk, ck = curve_fit(lambda t, a, c, w, b: a * np.exp(-0.5 * ((t - c) / w) ** 2) + b,
+                                   x[sel], y[sel], p0=[p0[3 * k], lv, p0[3 * k + 2], 0.0],
+                                   sigma=sig[sel], maxfev=20000)
+                ek = np.sqrt(np.clip(np.diag(ck), 0, None))
+            except Exception:
+                return None
+            p += list(pk[:3])
+            err += list(ek[:3])
+        p = np.array(p + [0.0])
+        err = np.array(err + [0.0])
+    centers = p[1:-1:3]
+    order = np.argsort(centers)
+    centers = centers[order]
+    cerr = err[1:-1:3][order]
+    widths = np.abs(p[2:-1:3][order])
+    amps = p[0:-1:3][order]
+    steps = np.diff(centers)
+    serr = np.hypot(cerr[1:], cerr[:-1])
+    ladder = {}
+    if reference_step and len(centers) >= 2:
+        n = np.round((centers - centers[0]) / reference_step).astype(int)
+        if len(np.unique(n)) >= 2:
+            w = 1 / np.maximum(cerr, 1e-12) ** 2
+            A = np.c_[np.ones_like(n, float), n]
+            W = np.diag(w)
+            cov_l = np.linalg.inv(A.T @ W @ A)
+            coef = cov_l @ A.T @ W @ centers
+            res = centers - A @ coef
+            dof = len(centers) - 2
+            scale = max(1.0, float(res @ W @ res) / dof) if dof > 0 else 1.0
+            ladder = {"step": float(coef[1]), "error": float(np.sqrt(cov_l[1, 1] * scale)),
+                      "n": n.tolist()}
+    return LevelFit(centers, cerr, widths, amps, steps, serr, _gauss_sum(x, *p), ladder)
+
+
+@dataclass
+class ProfileSteps:
+    edges: np.ndarray         # positions of the step edges along the profile (nm)
+    heights: np.ndarray       # signed step heights (rise along the profile)
+    errors: np.ndarray        # 1σ (fit covariance scaled by the residual)
+    slope: float              # residual slope along the profile (height unit / nm)
+    terraces: np.ndarray      # terrace widths between neighbouring edges (nm)
+    model: np.ndarray         # fitted staircase on the profile grid
+    used: np.ndarray          # points used in the fit (edge zones excluded)
+    residual_rms: float
+
+
+def profile_steps(s, h, min_step=0.2, edge_exclusion_nm=20.0, smooth_nm=0.0) -> ProfileSteps:
+    """Staircase fit of a (wide, averaged) profile perpendicular to the steps.
+
+    Edges are located where the height changes by more than ``min_step``/2 within
+    ``edge_exclusion_nm``. Then h(s) = a + b·s + Σ_k H_k·Θ(s − e_k) is fitted by
+    least squares to all points farther than ``edge_exclusion_nm``/2 from an edge, so
+    a residual tilt along the profile (b) does not bias the step heights H_k."""
+    s = np.asarray(s, float)
+    h = np.asarray(h, float)
+    ds = s[1] - s[0] if len(s) > 1 else 1.0
+    hs = ndimage.gaussian_filter1d(h, smooth_nm / ds) if smooth_nm > 0 else h
+    half = max(1, int(round(edge_exclusion_nm / 2 / ds)))
+    D = np.full_like(hs, 0.0)
+    D[half:-half] = hs[2 * half:] - hs[:-2 * half]
+    pk, _ = signal.find_peaks(np.abs(D), height=0.5 * min_step, distance=max(1, 2 * half))
+    # an edge needs a usable plateau on both sides (not just the profile end)
+    pk = pk[(s[pk] - s[0] > edge_exclusion_nm) & (s[-1] - s[pk] > edge_exclusion_nm)]
+    edges = s[pk]
+    used = np.ones_like(s, bool)
+    for e in edges:
+        used &= np.abs(s - e) > edge_exclusion_nm / 2
+    cols = [np.ones_like(s), s - s.mean()] + [(s > e).astype(float) for e in edges]
+    A = np.stack(cols, axis=1)
+    if used.sum() <= A.shape[1]:
+        used[:] = True
+    coef, *_ = np.linalg.lstsq(A[used], h[used], rcond=None)
+    res = h[used] - A[used] @ coef
+    dof = max(1, used.sum() - A.shape[1])
+    s2 = float(res @ res) / dof
+    cov = s2 * np.linalg.pinv(A[used].T @ A[used])
+    err = np.sqrt(np.clip(np.diag(cov), 0, None))
+    return ProfileSteps(edges=edges, heights=coef[2:], errors=err[2:], slope=float(coef[1]),
+                        terraces=np.diff(edges), model=A @ coef, used=used,
+                        residual_rms=float(np.sqrt(np.mean(res ** 2))))
