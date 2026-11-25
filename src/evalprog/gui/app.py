@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox, QTabWidget
 from evalprog import __version__, materials
 
 from .placeholder import PLANNED, PlaceholderTab
+from .harmonics_tab import HarmonicsTab
 from .rsm_tab import RSMTab
 from .rt_tab import RTTab
 from .widgets import settings
@@ -29,6 +30,8 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.xrd, "XRD")
         self.tabs.addTab(self.rsm, "RSM")
         self.tabs.addTab(self.rt, "R(T)")
+        self.harmonics = HarmonicsTab()
+        self.tabs.addTab(self.harmonics, "R(H) / Harmonics")
         for title, text in PLANNED:
             self.tabs.addTab(PlaceholderTab(title, text), title)
         self.setCentralWidget(self.tabs)

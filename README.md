@@ -10,7 +10,8 @@ notebooks without the GUI.
 | XRD (symmetric 2θ-ω) | substrate database, automatic substrate peak fit, zero-shift and sample-height correction, film peaks, out-of-plane strain |
 | RSM | 2D pseudo-Voigt fits, substrate-based Δ2θ/Δω correction, in-/out-of-plane lattice, strain, relaxation |
 | R(T) | QD ETO / Resistivity option / Zurich lock-in (LabVIEW) files, T_c analysis, magnetic kinks, MIT, RRR, ρ and R_sheet |
-| R(H) / Harmonics, MPMS, Ellipsometry, AFM, TEM | planned |
+| R(H) / Harmonics | Zurich lock-in (LabVIEW) field sweeps with 1f/2f/3f: symmetrisation, R(T), heating from 3f, normal Hall subtraction, R_H and n, series comparisons with power-law fits |
+| MPMS, Ellipsometry, AFM, TEM | planned |
 
 ## Installation
 
@@ -98,6 +99,24 @@ macOS `EvaluationProgram.app`). Build on the operating system you want to run it
 * Click into the plot to add a manual marker. Results are collected in a table and
   can be exported; curves are exported with Origin-style long-name/unit header lines.
 
+## R(H) / Harmonics
+
+Port of the stand-alone higher-harmonics program (same algorithms, English UI).
+Files are classified automatically as field sweeps or R(T) curves.
+
+* **Evaluation**: loop split into down/up sweep, resampled on a symmetric field grid,
+  sym(B) = [S_down(B) + S_up(−B)]/2, antisym(B) = [S_down(B) − S_up(−B)]/2; output in V or ρ.
+  A measurement restarted within one file is detected (last section / each / all).
+* **R(T)**: R = ReZ1f/I from R(T) files or imported tables, smoothed dR/dT.
+* **Heating (3f)**: ΔT₂ω = 2|V₃f|/(I|dR/dT|) with an automatically matched R(T) curve.
+* **Hall**: fit R₀·B (+ A·sgn B) for |B| ≥ B_min, subtract R₀·B, R_H and n.
+* **Comparison**: any set of sweeps or an automatically selected series (only T, I, f or
+  angle varies), normalisation (÷Iⁿ, MR, ÷S(0)), value at B₀ or maximum vs. parameter,
+  log-log power-law fit.
+
+All results go to `<measurement folder>/output/` (CSV with Origin header lines) and
+`output/figures/`.
+
 ## Materials database
 
 Built-in tables: `src/evalprog/materials/data/substrates.json` and `films.json`.
@@ -137,7 +156,6 @@ should be added to `tests/data/` as they become available.
 
 ## Roadmap
 
-* Port of the R(H) / higher-harmonics program as a tab
 * MPMS M(T), M(H)
 * Ellipsometry, AFM
 * GenX integration for XRR (run GenX fits / read `.hgx` results)

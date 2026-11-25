@@ -10,7 +10,8 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from evalprog.materials import get_substrate  # noqa: E402
 
-from synth import rsm_grid, write_qd_sc, write_xrdml_map, write_xy, xrd_scan  # noqa: E402
+from synth import (rsm_grid, write_lockin_rt, write_lockin_sweep, write_qd_sc,  # noqa: E402
+                   write_xrdml_map, write_xy, xrd_scan)
 
 
 @pytest.fixture(scope="module")
@@ -21,7 +22,8 @@ def window():
     def raiser(parent, title, exc):
         raise AssertionError(f"{title}: {exc}")
 
-    for mod in (rsm_tab, rt_tab, xrd_tab):
+    from evalprog.gui import harmonics_tab
+    for mod in (rsm_tab, rt_tab, xrd_tab, harmonics_tab):
         mod.show_error = raiser
     app = QApplication.instance() or QApplication([])
     w = MainWindow()
@@ -80,3 +82,29 @@ def test_rt_tab(window, tmp_path):
     tab.cb_branch.setCurrentIndex(0)
     tab.on_analyse()
     assert len(tab.results) == 3
+
+
+def test_harmonics_tab(window, tmp_path):
+    tab = window.harmonics
+    paths = []
+    for k, T in enumerate((5.0, 10.0)):
+        p = tmp_path / f"sw{k}.txt"
+        write_lockin_sweep(p, T=T, seed=k)
+        paths.append(p)
+    rt = tmp_path / "rt.txt"
+    write_lockin_rt(rt)
+    tab.add_files(paths + [rt])
+    tab.chk_plots.setChecked(False)
+    tab.on_run()
+    assert len(tab.sweeps) == 2 and len(tab.rts) == 1
+    tab.on_rt_plot(save=True)
+    tab.on_heating(all_=True)
+    assert all(r.heating is not None for r in tab.sweeps.values())
+    tab.list_hall.selectAll()
+    tab.on_hall()
+    assert all(r.hall for r in tab.sweeps.values())
+    tab.list_cmp.selectAll()
+    tab.on_compare()
+    tab.on_compare_save()
+    tab.rb_raw.setChecked(True)
+    assert (tmp_path / "output").is_dir()
