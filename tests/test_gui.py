@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from evalprog.materials import get_substrate  # noqa: E402
 
-from synth import (rsm_grid, write_lockin_rt, write_lockin_sweep, write_qd_sc,  # noqa: E402
+from synth import (afm_terraces, rsm_grid, write_nanoscope, write_lockin_rt, write_lockin_sweep, write_qd_sc,  # noqa: E402
                    write_xrdml_map, write_xy, xrd_scan)
 
 
@@ -22,8 +22,8 @@ def window():
     def raiser(parent, title, exc):
         raise AssertionError(f"{title}: {exc}")
 
-    from evalprog.gui import harmonics_tab
-    for mod in (rsm_tab, rt_tab, xrd_tab, harmonics_tab):
+    from evalprog.gui import afm_tab, harmonics_tab
+    for mod in (rsm_tab, rt_tab, xrd_tab, harmonics_tab, afm_tab):
         mod.show_error = raiser
     app = QApplication.instance() or QApplication([])
     w = MainWindow()
@@ -108,3 +108,24 @@ def test_harmonics_tab(window, tmp_path):
     tab.on_compare_save()
     tab.rb_raw.setChecked(True)
     assert (tmp_path / "output").is_dir()
+
+
+def test_afm_tab(window, tmp_path):
+    tab = window.afm
+    z, _ = afm_terraces()
+    p = tmp_path / "img.spm"
+    write_nanoscope(p, [("Height", z), ("Phase", z * 0)])
+    tab.load(str(p))
+    assert tab.cb_channel.count() == 2
+    tab.cb_bg.setCurrentText("terraces (facet level)")
+    tab.cb_rows.setCurrentText("median of differences")
+    steps = tab.hist.steps[tab.hist.steps > 0.2]
+    assert np.median(steps) == pytest.approx(0.3905, abs=0.03)
+    tab.set_profile((100.0, 1000.0), (1900.0, 1000.0))
+    assert tab.profile is not None
+    tab.cb_kind.setCurrentText("pits")
+    tab.sp_thr.setValue(1.0)
+    tab.on_features()
+    assert tab.features.summary["count"] >= 5
+    tab.chk_showmask.setChecked(True)
+    tab.plot.figure.savefig(tmp_path / "afm.png")

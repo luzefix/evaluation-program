@@ -1,5 +1,7 @@
 """Synthetic data files for tests and demos."""
 
+from pathlib import Path
+
 import numpy as np
 
 from evalprog.core.rsm.analysis import angles_to_q, expected_q, pv2d, q_to_angles
@@ -115,3 +117,55 @@ def write_lockin_rt(path, I=1e-5, r0=50.0, slope=5.0, T0=10.0):
     lines = [LOCKIN_HEADER.format(I=I)]
     lines += ["\t".join(f"{c[i]:.10g}" for c in cols) for i in range(n)]
     path.write_text("\n".join(lines))
+
+
+# --------------------------------------------------------------------------- AFM
+
+
+def afm_terraces(n=256, size_nm=2000.0, step=0.3905, terrace_nm=250.0, tilt=(2e-3, -1e-3),
+                 row_sigma=0.3, scars=((60, 0.8), (150, -0.6)), pits=8, seed=0):
+    """Vicinal surface: terraces of width terrace_nm (steps along x), plus an
+    instrument tilt, random line offsets, two scars and some pits (2 nm deep).
+    Returns (z_measured, z_true_levelled) in nm."""
+    rng = np.random.default_rng(seed)
+    dx = size_nm / n
+    y, x = np.mgrid[:n, :n] * dx
+    edge = x + 40 * np.sin(2 * np.pi * y / size_nm)        # meandering step edges
+    true = -step * np.floor(edge / terrace_nm)
+    for _ in range(pits):
+        cx, cy = rng.uniform(0, size_nm, 2)
+        true = np.where((x - cx) ** 2 + (y - cy) ** 2 < 30.0 ** 2, true - 2.0, true)
+    z = true + tilt[0] * x + tilt[1] * y + rng.normal(0, 0.02, true.shape)
+    z += rng.normal(0, row_sigma, n)[:, None]
+    for row, h in scars:
+        z[row, n // 4: n // 4 + n // 3] += h
+    return z, true
+
+
+def write_nanoscope(path, channels, size_nm=2000.0, zsens=7.471396):
+    """Minimal NanoScope v9 file. channels: list of (name, z_nm) with 32-bit data
+    and 'Bytes/pixel: 2' in the header, as written by NanoScope 9."""
+    ny, nx = channels[0][1].shape
+    zscale_v = 10.0
+    lsb_nm = zscale_v / 65536 * zsens
+    header_len = 8192
+    blocks = []
+    off = header_len
+    for name, _ in channels:
+        blocks.append(
+            "\\*Ciao image list\r\n"
+            f"\\Data offset: {off}\r\n\\Data length: {nx * ny * 4}\r\n\\Bytes/pixel: 2\r\n"
+            f"\\Samps/line: {nx}\r\n\\Number of lines: {ny}\r\n"
+            f"\\Scan Size: {size_nm / 1e3:g} {size_nm / 1e3:g} ~m\r\n\\Line Direction: Retrace\r\n"
+            f'\\@2:Image Data: S [{name}] "{name}"\r\n'
+            f"\\@2:Z scale: V [Sens. Zsens] (0.006713867 V/LSB) {zscale_v} V\r\n")
+        off += nx * ny * 4
+    head = ("\\*File list\r\n\\Version: 0x09700106\r\n\\Data length: 8192\r\n"
+            "\\*Ciao scan list\r\n"
+            f"\\Scan Size: {size_nm:g} nm\r\n\\Samps/line: {nx}\r\n\\Lines: {ny}\r\n"
+            f"\\@Sens. Zsens: V {zsens} nm/V\r\n" + "".join(blocks) + "\\*File list end\r\n")
+    hb = head.encode("latin-1")
+    hb += b"\x00" * (header_len - len(hb))
+    data = b"".join(np.flipud(np.round(z / lsb_nm)).astype("<i4").tobytes() for _, z in channels)
+    Path(path).write_bytes(hb + data)
+    return lsb_nm

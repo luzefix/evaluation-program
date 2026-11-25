@@ -11,7 +11,8 @@ notebooks without the GUI.
 | RSM | 2D pseudo-Voigt fits, substrate-based Δ2θ/Δω correction, in-/out-of-plane lattice, strain, relaxation |
 | R(T) | QD ETO / Resistivity option / Zurich lock-in (LabVIEW) files, T_c analysis, magnetic kinks, MIT, RRR, ρ and R_sheet |
 | R(H) / Harmonics | Zurich lock-in (LabVIEW) field sweeps with 1f/2f/3f: symmetrisation, R(T), heating from 3f, normal Hall subtraction, R_H and n, series comparisons with power-law fits |
-| MPMS, Ellipsometry, AFM, TEM | planned |
+| AFM | Bruker NanoScope `.spm` / ASCII matrices: scar removal, plane / polynomial / terrace levelling, line alignment, roughness, terrace levels and step heights, profiles, PSD, pits / islands |
+| MPMS, Ellipsometry, TEM | planned |
 
 ## Installation
 
@@ -117,6 +118,32 @@ Files are classified automatically as field sweeps or R(T) curves.
 All results go to `<measurement folder>/output/` (CSV with Origin header lines) and
 `output/figures/`.
 
+## AFM
+
+* **Files**: Bruker / Veeco NanoScope (`.spm`, `.000` …, all channels; height in nm
+  from Z scale × Zsens) and Gwyddion-style ASCII matrices.
+* **Corrections** (in this order, each can be switched off):
+  1. background + line alignment, then **scar removal**: streaks 1–3 lines wide that
+     differ from the lines above *and* below by > n·σ (σ = robust line-to-line noise),
+     at least *min. length* pixels long, are replaced by interpolation along the slow axis;
+  2. **background**: plane, polynomial (2nd/3rd order, for piezo bow) or
+     *terraces (facet level)*: the plane whose slope is the mean local gradient after
+     rejecting step edges, so terraces of a vicinal surface become horizontal (a
+     least-squares plane tilts them by the miscut);
+  3. **line alignment**: median per line (rough films, particles) or *median of
+     differences* (terraces, large features: aligns each line to the previous one);
+     mean / linear / quadratic per line;
+  4. pits and particles (> n·σ) are masked and the fits of 2 and 3 repeated without them;
+  5. optional spike removal (median filter), zero level (median / minimum / mean).
+* **Analysis**: Sq, Sa, Sz, Ssk, Sku (whole image and without masked features),
+  correlation length (ACF = 1/e), height histogram with automatic level detection
+  and step heights in units of a reference step (e.g. 0.3905 nm for SrTiO3),
+  line profiles (drag a line, adjustable averaging width), 1D PSD along both axes,
+  pits / islands relative to a local reference level (count, density, area fraction,
+  size, depth, volume).
+* **Export**: corrected image as ASCII matrix (opens in Gwyddion), profile, results
+  and feature tables as CSV, figures as PNG, into `<data folder>/output/`.
+
 ## Materials database
 
 Built-in tables: `src/evalprog/materials/data/substrates.json` and `films.json`.
@@ -157,7 +184,7 @@ should be added to `tests/data/` as they become available.
 ## Roadmap
 
 * MPMS M(T), M(H)
-* Ellipsometry, AFM
+* Ellipsometry
 * GenX integration for XRR (run GenX fits / read `.hgx` results)
 * eLabFTW: upload results and figures to experiments via the REST API
 * Python control of the Zurich Instruments lock-ins (zhinst)

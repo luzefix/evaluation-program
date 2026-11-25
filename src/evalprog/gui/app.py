@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox, QTabWidget
 
 from evalprog import __version__, materials
 
+from .afm_tab import AFMTab
 from .placeholder import PLANNED, PlaceholderTab
 from .harmonics_tab import HarmonicsTab
 from .rsm_tab import RSMTab
@@ -32,6 +33,8 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.rt, "R(T)")
         self.harmonics = HarmonicsTab()
         self.tabs.addTab(self.harmonics, "R(H) / Harmonics")
+        self.afm = AFMTab()
+        self.tabs.addTab(self.afm, "AFM")
         for title, text in PLANNED:
             self.tabs.addTab(PlaceholderTab(title, text), title)
         self.setCentralWidget(self.tabs)
@@ -61,7 +64,7 @@ class MainWindow(QMainWindow):
         a = QAction("About", self)
         a.triggered.connect(lambda: QMessageBox.about(
             self, "Evaluation Program",
-            f"Evaluation Program {__version__}<br>Thin-film XRD, RSM and transport analysis."))
+            f"Evaluation Program {__version__}<br>Thin-film XRD, RSM, transport and AFM analysis."))
         m.addAction(a)
 
     def open_materials(self):

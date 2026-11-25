@@ -18,6 +18,5 @@ PLANNED = [
     ("MPMS", "Magnetisation M(T), M(H) from Quantum Design MPMS .dat files: diamagnetic substrate "
      "background subtraction, emu → µB/f.u. and emu/cm³, T_C / T_N, coercive field, remanence."),
     ("Ellipsometry", "Ψ/Δ display and analysis. The instrument and its export format are still to be defined."),
-    ("AFM", "Topography images: plane/line levelling, RMS roughness, step heights, line profiles."),
     ("TEM", "To be discussed."),
 ]
