@@ -359,6 +359,7 @@ class RTTab(QWidget):
         self.results.append(row)
         self.table.set_rows(self.results)
         self.redraw()
+        self.db.auto()
 
     # --------------------------------------------------------------- export
     def _base(self):
@@ -395,6 +396,7 @@ class RTTab(QWidget):
             f.write(",".join(["Temperature", self.cb_qty.currentText(), "Temperature", "smoothed", "d/dT", "d2/dT2"]) + "\n")
             f.write(",".join(["K", unit, "K", unit, f"{unit}/K", f"{unit}/K^2"]) + "\n")
             out.to_csv(f, index=False, header=False)
+        self.db.attach(p, "curve csv")
 
     def db_record(self) -> Measurement:
         it = self.list.currentItem()
@@ -431,8 +433,11 @@ class RTTab(QWidget):
         p = save_file(self, "Save results", f"{self._base()}_results.csv", "CSV (*.csv)")
         if p:
             pd.DataFrame(self.results, columns=self.table.columns).to_csv(p, index=False)
+            self.db.attach(p, "results csv")
 
     def on_save_fig(self):
         p = save_file(self, "Save figure", f"{self._base()}.png", "PNG (*.png);;PDF (*.pdf)")
         if p:
             self.plot.figure.savefig(p, dpi=300)
+            if self.list.currentItem() is not None:
+                self.db.attach(p, "figure")

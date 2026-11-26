@@ -388,17 +388,23 @@ class DatabaseTab(QWidget):
         lay.addWidget(group("Compare parameters", [("x", self.cb_x), ("y", self.cb_y),
                                                    ("Colour by", self.cb_group), self.chk_sel, b_sc]))
 
+        b_tab = QPushButton("Open selected in analysis tab")
+        b_tab.setToolTip("Loads the raw file(s) of the selected rows into XRD / RSM / R(T) / R(H) / AFM")
+        b_tab.clicked.connect(self.on_open_in_tab)
+        b_files = QPushButton("Evaluated files …")
+        b_files.clicked.connect(self.on_files)
         b_edit = QPushButton("Edit sample …")
         b_edit.clicked.connect(self.on_edit_sample)
         b_move = QPushButton("Assign to sample …")
         b_move.clicked.connect(self.on_assign)
-        b_open = QPushButton("Open raw file")
+        b_open = QPushButton("Raw file folder")
         b_open.clicked.connect(self.on_open_raw)
         b_del = QPushButton("Delete selected")
         b_del.clicked.connect(self.on_delete)
         b_csv = QPushButton("Export table (.csv)")
         b_csv.clicked.connect(self.on_export)
-        lay.addWidget(group("Entries", [hbox(b_edit, b_move), hbox(b_open, b_del), b_csv]))
+        lay.addWidget(group("Entries", [b_tab, hbox(b_files, b_open), hbox(b_edit, b_move), hbox(b_del, b_csv)]))
+        self.open_in_tab = None     # set by the main window: callable(list of row dicts)
 
         b_sync = QPushButton("Sync now")
         b_sync.clicked.connect(lambda: self.on_sync(False))
@@ -635,6 +641,54 @@ class DatabaseTab(QWidget):
             QMessageBox.information(self, "Open raw file", f"File not found:\n{p}")
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(p).parent)))
+
+    def on_open_in_tab(self):
+        sel = self.selected()
+        if sel.empty:
+            QMessageBox.information(self, "Open in tab", "Select rows in the table first.")
+            return
+        rows = sel.to_dict("records")
+        missing = [r["raw_path"] for r in rows if not r.get("raw_path") or not Path(r["raw_path"]).exists()]
+        if missing:
+            QMessageBox.information(self, "Open in tab", "Raw file(s) not found:\n" + "\n".join(map(str, missing)))
+            rows = [r for r in rows if r.get("raw_path") and Path(r["raw_path"]).exists()]
+        if rows and self.open_in_tab:
+            self.open_in_tab(rows)
+
+    def on_files(self):
+        r = self._one("Evaluated files")
+        if r is None:
+            return
+        files = current_db().files(int(r["id"]))
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Files of {r['sample']} {r['technique']} {r.get('label') or ''}")
+        dlg.resize(760, 320)
+        lw = QListWidget()
+        raw = r.get("raw_path")
+        for role, path in ([("raw data", raw)] if raw else []) + files:
+            ok = Path(path).exists()
+            it = QListWidgetItem(f"{role}:   {path}" + ("" if ok else "   (not found)"))
+            it.setData(Qt.UserRole, path)
+            lw.addItem(it)
+
+        def open_(folder=False):
+            it = lw.currentItem()
+            if it is None:
+                return
+            p = Path(it.data(Qt.UserRole))
+            target = p if (p.is_dir() or not folder) else p.parent
+            if target.exists():
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
+
+        lw.itemDoubleClicked.connect(lambda *_: open_())
+        b1, b2 = QPushButton("Open"), QPushButton("Show in folder")
+        b1.clicked.connect(lambda: open_())
+        b2.clicked.connect(lambda: open_(True))
+        v = QVBoxLayout(dlg)
+        v.addWidget(QLabel("Raw file and every file saved from the analysis tabs (double-click opens):"))
+        v.addWidget(lw)
+        v.addWidget(hbox(b1, b2))
+        dlg.exec()
 
     def on_delete(self):
         sel = self.selected()

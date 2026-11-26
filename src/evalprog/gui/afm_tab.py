@@ -340,6 +340,7 @@ class AFMTab(QWidget):
         self.results = rows
         self.table.set_rows(rows)
         self.redraw()
+        self.db.auto()
 
     def on_features(self):
         if self.result is None:
@@ -552,6 +553,7 @@ class AFMTab(QWidget):
         if p:
             afm.save_ascii_matrix(p, self.result.z, self.channel.width_nm, self.channel.height_nm,
                                   self.channel.name, self.channel.unit)
+            self.db.attach(p, "corrected image")
 
     def on_save_profile(self):
         if self.profile is None:
@@ -568,6 +570,7 @@ class AFMTab(QWidget):
                 else:
                     fh.write(f"Distance,Height\nnm,{self.channel.unit}\n")
                     np.savetxt(fh, np.c_[s, h], delimiter=",", fmt="%.6g")
+            self.db.attach(p, "profile csv")
 
     def db_record(self) -> Measurement:
         if self.result is None:
@@ -603,9 +606,11 @@ class AFMTab(QWidget):
                     fh.write(f"# profile ({p0[0]:.0f}, {p0[1]:.0f}) -> ({p1[0]:.0f}, {p1[1]:.0f}) nm, "
                              f"width {self.sp_width.value()} px\n")
                 df.to_csv(fh, index=False)
+            self.db.attach(p, "results csv")
             if self.features is not None and self.features.table:
-                pd.DataFrame(self.features.table).to_csv(
-                    Path(p).with_name(Path(p).stem + f"_{self.features.kind}.csv"), index=False)
+                fp = Path(p).with_name(Path(p).stem + f"_{self.features.kind}.csv")
+                pd.DataFrame(self.features.table).to_csv(fp, index=False)
+                self.db.attach(fp, f"{self.features.kind} csv")
 
     def on_save_figs(self):
         if self.result is None:
@@ -616,3 +621,4 @@ class AFMTab(QWidget):
             self.plot.figure.savefig(p, dpi=200)
             self.plot_hist.figure.savefig(p.with_name(p.stem + "_histogram.png"), dpi=200)
             self.plot_psd.figure.savefig(p.with_name(p.stem + "_psd.png"), dpi=200)
+            self.db.attach(p, "figure")

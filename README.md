@@ -220,11 +220,19 @@ are preferred) and can be corrected before *Save to database*. Results, the raw-
 path, the settings and the curves (scan, R(T), profile) are stored in a local SQLite file
 (`~/.evaluation_program/evalprog.sqlite`, changeable in the Database tab).
 Samples have a type (thin film, bulk crystal, lamella, ...); film fields are optional.
+With *save automatically after each evaluation / export* (on by default) every fit or
+analysis is stored without clicking, re-evaluating a file replaces its entry, and every
+file exported from a tab (CSV, corrected scan, figures, R(H) output) is recorded with
+its path. The R(H) tab stores one entry per field sweep (sym/antisym of all signals,
+Hall and heating results).
 
 The **Database** tab lists one row per measurement with every result and synthesis
 parameter (`syn: ...`) as a column: sort by clicking a header, filter by technique,
 sample type, text or any parameter (`T_Dep > 720`), overlay curves of selected rows
 (normalised, waterfall) and plot any two quantities against each other (e.g. c vs T_Dep).
+*Open selected in analysis tab* loads the raw files of the selected rows back into
+XRD / RSM / R(T) / R(H) / AFM with one click; *Evaluated files* lists and opens all
+recorded output files.
 
 ### elabFTW
 

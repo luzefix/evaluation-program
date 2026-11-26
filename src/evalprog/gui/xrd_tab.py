@@ -203,6 +203,7 @@ class XRDTab(QWidget):
         # re-evaluate film peaks with the new correction
         self.film_peaks = [self._refit_film(fp) for fp in self.film_peaks]
         self._refresh()
+        self.db.auto()
 
     def _refit_film(self, fp):
         raw = fp["raw_center"]
@@ -260,6 +261,7 @@ class XRDTab(QWidget):
                                 "fit": fr})
         self.last_fit = fr
         self._refresh(zoom=(lo, hi))
+        self.db.auto()
 
     def on_remove_film(self):
         i = self.tab_film.selected_row()
@@ -268,6 +270,7 @@ class XRDTab(QWidget):
         if i is not None and 0 <= i < len(self.film_peaks):
             del self.film_peaks[i]
             self._refresh()
+            self.db.auto()
 
     # --------------------------------------------------------------- plots
     def _refresh(self, zoom=None):
@@ -434,6 +437,7 @@ class XRDTab(QWidget):
         with open(p, "w", encoding="utf-8") as f:
             f.write(f"# file: {self.scan.path}\n# correction: {self.correction.describe()}\n")
             df.to_csv(f, index=False)
+        self.db.attach(p, "results csv")
 
     def on_save_xy(self):
         if self.scan is None:
@@ -442,6 +446,7 @@ class XRDTab(QWidget):
         if p:
             np.savetxt(p, np.column_stack([self.corrected_x(), self.scan.intensity]), fmt="%.5f",
                        header=f"2theta_corrected intensity  ({self.correction.describe()})")
+            self.db.attach(p, "corrected scan")
 
     def on_save_fig(self):
         if self.scan is None:
@@ -449,3 +454,4 @@ class XRDTab(QWidget):
         p = save_file(self, "Save figure", f"{self._base()}_xrd.png", "PNG (*.png);;PDF (*.pdf)")
         if p:
             self.plot.figure.savefig(p, dpi=300)
+            self.db.attach(p, "figure")

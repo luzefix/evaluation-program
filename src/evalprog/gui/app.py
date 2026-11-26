@@ -40,6 +40,7 @@ class MainWindow(QMainWindow):
         self.afm = AFMTab()
         self.tabs.addTab(self.afm, "AFM")
         self.database = DatabaseTab()
+        self.database.open_in_tab = self.open_measurements
         self.tabs.addTab(self.database, "Database")
         for title, text in PLANNED:
             self.tabs.addTab(PlaceholderTab(title, text), title)
@@ -60,6 +61,42 @@ class MainWindow(QMainWindow):
         if not os.environ.get("EVALPROG_SMOKE") and not os.environ.get("EVALPROG_NO_SYNC"):
             QTimer.singleShot(5000, self.auto_sync)
             self.sync_timer.start()
+
+    def open_measurements(self, rows):
+        """Load the raw files of database rows into their analysis tabs."""
+        by_tech = {}
+        for r in rows:
+            by_tech.setdefault(r["technique"], []).append(r)
+        last = None
+        for tech, rs in by_tech.items():
+            paths = list(dict.fromkeys(r["raw_path"] for r in rs))
+            sample = rs[-1]["sample"]
+            if tech == "XRD":
+                self.xrd.load(paths[-1])
+                tab = self.xrd
+            elif tech == "RSM":
+                self.rsm.load(paths[-1])
+                tab = self.rsm
+            elif tech == "AFM":
+                self.afm.load(paths[-1])
+                tab = self.afm
+            elif tech == "R(H)":
+                self.harmonics.add_files(paths)
+                tab = self.harmonics
+                tab.on_run()
+            elif tech == "R(T)":
+                loaded = {str(d.path) for d in self.rt.datasets}
+                for p in paths:
+                    if str(p) not in loaded:
+                        self.rt.add_file(p)
+                tab = self.rt
+            else:
+                continue
+            tab.db.ed_sample.setText(sample)
+            tab.db._on_name()
+            last = tab
+        if last is not None:
+            self.tabs.setCurrentWidget(last)
 
     def auto_sync(self):
         try:

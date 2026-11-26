@@ -111,6 +111,13 @@ def test_harmonics_tab(window, tmp_path):
     tab.on_compare_save()
     tab.rb_raw.setChecked(True)
     assert (tmp_path / "output").is_dir()
+    from evalprog.gui.db_widgets import current_db
+    tab.db.ed_sample.setText("CIO9")
+    tab.db.on_save()
+    t = current_db().table()
+    rh = t[t["technique"] == "R(H)"]
+    assert len(rh) == 2 and rh["T"].notna().all()
+    assert current_db().curves(int(rh["id"].iloc[0]))
 
 
 def test_afm_tab(window, tmp_path):
@@ -179,11 +186,12 @@ def test_database(window, tmp_path):
     rt.db.on_save()
     db = current_db()
     t = db.table()
-    assert sorted(t["technique"]) == ["R(T)", "XRD"]
+    n0 = len(t)
+    assert (t["technique"] == "XRD").sum() == 1
     assert t["Tc_mid"].dropna().item() == pytest.approx(30.0, abs=0.5)
     dbt = window.database
     dbt.reload()
-    assert dbt.model.rowCount() == 2
+    assert dbt.model.rowCount() == n0
     dbt.cb_tech.setCurrentText("XRD")
     assert dbt.model.rowCount() == 1
     dbt.cb_tech.setCurrentText("all")
@@ -205,3 +213,22 @@ def test_database(window, tmp_path):
     dbt.cb_y.setCurrentText("Tc_mid")
     dbt.on_scatter()
     dbt.plot.figure.savefig(tmp_path / "db.png")
+    # exported files are referenced, automatic saving is armed after an evaluation
+    csv = tmp_path / "CIO9_xrd_results.csv"
+    csv.write_text("x")
+    tab.db.attach(csv, "results csv")
+    t = db.table()
+    mid = int(t.loc[t["technique"] == "XRD", "id"].item())
+    assert ("results csv", str(csv)) in db.files(mid)
+    tab.db.on_save()                       # re-saving keeps the file reference
+    t = db.table()
+    mid = int(t.loc[t["technique"] == "XRD", "id"].item())
+    assert len(db.files(mid)) == 1
+    tab.on_fit_film()
+    assert tab.db._timer.isActive()
+    tab.db._timer.stop()
+    # one click: raw file back into its tab
+    row = t[t["technique"] == "XRD"].to_dict("records")
+    window.xrd.scan = None
+    window.open_measurements(row)
+    assert window.xrd.scan is not None and window.tabs.currentWidget() is window.xrd

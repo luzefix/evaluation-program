@@ -336,6 +336,7 @@ class RSMTab(QWidget):
         self._update_table()
         self.table.selectRow(len(self.peaks) - 1)
         self.redraw()
+        self.db.auto()
 
     def on_delete(self):
         i = self.table.selected_row()
@@ -343,6 +344,8 @@ class RSMTab(QWidget):
             del self.peaks[i]
             self._update_table()
             self.redraw()
+            if self.peaks:
+                self.db.auto()
 
     def _update_table(self):
         rows = []
@@ -427,3 +430,6 @@ class RSMTab(QWidget):
                         f"d2theta = {self.offset.d_two_theta:.5f} deg, domega = {self.offset.d_omega:.5f} deg\n")
             self.results_frame().to_csv(f, index=False)
         self.plot.figure.savefig(Path(p).with_suffix(".png"), dpi=250)
+        if self.peaks:
+            self.db.attach(p, "results csv")
+            self.db.attach(Path(p).with_suffix(".png"), "figure")

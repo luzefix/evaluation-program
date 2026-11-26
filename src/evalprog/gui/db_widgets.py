@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import QCheckBox, QCompleter, QLineEdit, QMessageBox, QPushButton
 
 from evalprog.db.naming import guess_sample
@@ -19,6 +19,18 @@ class _Bus(QObject):
 
 
 BUS = _Bus()
+_EMIT = None
+
+
+def changed_soon():
+    """Emit BUS.changed once after a burst of saves (e.g. automatic saving)."""
+    global _EMIT
+    if _EMIT is None:
+        _EMIT = QTimer()
+        _EMIT.setSingleShot(True)
+        _EMIT.setInterval(300)
+        _EMIT.timeout.connect(BUS.changed.emit)
+    _EMIT.start()
 
 
 def db_path() -> str | None:
@@ -55,12 +67,19 @@ class SaveToDB:
         self.ed_note.setPlaceholderText("optional note")
         self.chk_replace = QCheckBox("overwrite earlier entry of this file")
         self.chk_replace.setChecked(True)
+        self.chk_auto = QCheckBox("save automatically after each evaluation / export")
+        self.chk_auto.setChecked(str(settings().value(f"db_auto_{technique}", "true")).lower() == "true")
+        self.chk_auto.toggled.connect(lambda v: settings().setValue(f"db_auto_{technique}", "true" if v else "false"))
+        self._timer = QTimer()
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(1000)
+        self._timer.timeout.connect(lambda: self._save(silent=True))
         self.btn = QPushButton("Save to database")
         self.btn.clicked.connect(self.on_save)
         self.lbl = info_label("")
         rows = [("Sample", self.ed_sample)] if self.own_edit else []
         self.group = group("Database", rows + [("Sample type", self.cb_type), ("Note", self.ed_note),
-                                               self.chk_replace, self.btn, self.lbl])
+                                               self.chk_auto, self.chk_replace, self.btn, self.lbl])
         BUS.changed.connect(self._refresh_completer)
         self._refresh_completer()
 
@@ -103,34 +122,67 @@ class SaveToDB:
         self.lbl.setText("")
 
     def on_save(self):
+        self._timer.stop()
+        self._save(silent=False)
+
+    def auto(self):
+        """Call after every evaluation: saves (debounced) if automatic saving is on."""
+        if self.chk_auto.isChecked() and self.sample():
+            self._timer.start()
+
+    def attach(self, path, role="export"):
+        """Call after writing an evaluated file: stores the entry and the file's path."""
+        if not path:
+            return
+        if not self.sample():
+            self.lbl.setText("Enter a sample name to keep track of exported files in the database.")
+            return
+        self._timer.stop()
+        self._save(silent=True, files=[(role, str(path))])
+
+    def _save(self, silent=False, files=()):
         name = self.sample()
+
+        def fail(msg, exc=None):
+            if silent:
+                self.lbl.setText(f"Not saved to database: {msg}")
+            elif exc is not None:
+                show_error(self.parent, "Save to database", exc)
+            else:
+                QMessageBox.information(self.parent, "Save to database", msg)
+
         if not name:
-            QMessageBox.information(self.parent, "Save to database", "Enter the sample name first.")
-            return
+            return fail("enter the sample name first.")
         try:
-            m = self.build()
+            ms = self.build()
         except ValueError as exc:
-            QMessageBox.information(self.parent, "Save to database", str(exc))
-            return
+            return fail(str(exc))
         except Exception as exc:
-            show_error(self.parent, "Save to database", exc)
-            return
-        m.sample = name
-        m.technique = m.technique or self.technique
-        m.sample_type = self.cb_type.currentText()
-        if self.ed_note.text().strip():
-            m.notes = self.ed_note.text().strip()
+            return fail(str(exc), exc)
+        ms = ms if isinstance(ms, list) else [ms]
         try:
             db = current_db()
             new_sample = db.get_sample(name) is None
-            db.save_measurement(m, replace=self.chk_replace.isChecked())
+            for m in ms:
+                m.sample = name
+                m.technique = m.technique or self.technique
+                m.sample_type = self.cb_type.currentText()
+                if self.ed_note.text().strip():
+                    m.notes = self.ed_note.text().strip()
+                m.files = list(m.files) + list(files)
+                db.save_measurement(m, replace=self.chk_replace.isChecked())
         except Exception as exc:
-            show_error(self.parent, "Save to database", exc)
-            return
-        what = f"{len(m.results)} result(s)" + (f", {len(m.curves)} curve(s)" if m.curves else "")
-        self.lbl.setText(f"Saved {what} for <b>{name}</b>" + (" (new sample)" if new_sample else "") + ".")
+            return fail(str(exc), exc)
+        nres, ncur = sum(len(m.results) for m in ms), sum(len(m.curves) for m in ms)
+        what = (f"{len(ms)} measurements, " if len(ms) > 1 else "") + f"{nres} result(s)" + \
+            (f", {ncur} curve(s)" if ncur else "")
+        if files:
+            what += f", file {Path(files[-1][1]).name}"
+        from datetime import datetime
+        self.lbl.setText(f"{datetime.now():%H:%M:%S} saved {what} for <b>{name}</b>"
+                         + (" (new sample)" if new_sample else "") + ".")
         self._on_name()
-        BUS.changed.emit()
+        changed_soon()
 
 
 def file_date(path) -> str | None:

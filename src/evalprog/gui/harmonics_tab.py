@@ -16,6 +16,9 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
 
 from evalprog.core import harmonics as hh
 
+from evalprog.db.store import Curve, Measurement, Result
+
+from .db_widgets import SaveToDB, file_date
 from .widgets import (PlotWidget, combo, group, hbox, info_label, ispin, open_files, scroll_panel,
                       settings, show_error, spin)
 
@@ -87,6 +90,9 @@ class HarmonicsTab(QWidget):
         lay.addWidget(self.btn_run)
         lay.addWidget(self.progress)
         lay.addWidget(b_out)
+        self.db = SaveToDB("R(H)", self.db_record, self)
+        self.db.btn.setText("Save all evaluated curves to database")
+        lay.addWidget(self.db.group)
 
         right = QSplitter(Qt.Vertical)
         self.tabs = QTabWidget()
@@ -307,12 +313,65 @@ class HarmonicsTab(QWidget):
             if p not in self.files:
                 self.files.append(p)
                 self.file_list.addItem(p.name)
+        if paths and not self.db.sample():
+            self.db.set_source(paths[0])
 
     def add_files(self, paths):
-        for p in map(Path, paths):
+        paths = list(map(Path, paths))
+        for p in paths:
             if p not in self.files:
                 self.files.append(p)
                 self.file_list.addItem(p.name)
+        if paths and not self.db.sample():
+            self.db.set_source(paths[0])
+
+    # ================================================================ database
+    def db_record(self) -> list:
+        """One database entry per evaluated field sweep (sym/antisym of every signal,
+        Hall numbers if fitted) and per R(T) curve."""
+        if not self.sweeps and not self.rts:
+            raise ValueError("Run the evaluation first.")
+        out = []
+        t_um = self.sp_t.value() or None
+        for r in self._sorted_sweeps():
+            res = [Result("T", r.T_K, None, "K"), Result("I", r.current_A, None, "A"),
+                   Result("f", r.f_Hz, None, "Hz"), Result("angle", r.angle, None, "deg"),
+                   Result("B_max", float(np.abs(r.loop[hh.FIELD_COL]).max()) / hh.OE_PER_T, None, "T"),
+                   Result("geometry", r.geometry)]
+            for col, fit in r.hall.items():
+                for k, v in hh.hall_numbers(r, fit, hh.hall_thickness(r, t_um)).items():
+                    key, unit = (k.split(" [", 1) + [""])[:2]
+                    res.append(Result(key, v, None, unit.rstrip("]"), hh.short_name(col)))
+            up = r.loop[r.loop[hh.BRANCH] == "up"]
+            B = up[hh.FIELD_COL].to_numpy(float) / hh.OE_PER_T
+            curves = []
+            for col in r.value_cols:
+                name = hh.short_name(col)
+                for part in ("sym", "antisym"):
+                    curves.append(Curve(f"{name} {part}", B, up[f"{col}_{part}"].to_numpy(float), "B (T)",
+                                        f"{name} {part} ({r.unit})", single=True))
+            settings = {"unit": r.unit, "field_step_Oe": r.field_step}
+            settings.update({k: str(v) for k, v in (r.meta or {}).items()})
+            files = [("evaluated csv", r.csv_path)] if r.csv_path else []
+            if (r.path.parent / "output").is_dir():
+                files.append(("output folder", r.path.parent / "output"))
+            if r.heating is not None and "dT_2w [K]" in r.heating.columns:
+                hu = r.heating[r.heating[hh.BRANCH] == "up"]
+                dT = hu["dT_2w [K]"].to_numpy(float)
+                res.append(Result("dT_2w max", float(np.nanmax(np.abs(dT))), None, "K"))
+                curves.append(Curve("heating dT_2w", hu[hh.FIELD_COL].to_numpy(float) / hh.OE_PER_T, dT,
+                                    "B (T)", "ΔT_2ω (K)", single=True))
+            out.append(Measurement(sample="", technique="R(H)", raw_path=str(r.path), label=r.tag,
+                                   measured_at=file_date(r.path), settings=settings, curves=curves,
+                                   results=[x for x in res if x.value is not None], files=files))
+        for rt in self.rts.values():
+            res = [Result("B", (rt.B_oe or 0) / hh.OE_PER_T, None, "T")]
+            if rt.current_A:
+                res.append(Result("I", rt.current_A, None, "A"))
+            out.append(Measurement(sample="", technique="R(T)", raw_path=str(rt.path), label=rt.label,
+                                   measured_at=file_date(rt.path), results=res,
+                                   curves=[Curve("R (Ohm)", rt.T, rt.R, "T (K)", "R (Ω)")]))
+        return out
 
     def on_remove(self):
         rows = sorted({self.file_list.row(it) for it in self.file_list.selectedItems()}, reverse=True)
@@ -366,6 +425,7 @@ class HarmonicsTab(QWidget):
             self.btn_run.setEnabled(True)
         self.log(f"=== Done: {ok}/{len(self.files)} files evaluated ===")
         self.refresh_lists()
+        self.db.auto()
         if self.rts and not self.sweeps:
             self.tabs.setCurrentIndex(1)
             self.on_rt_plot(False)
@@ -476,6 +536,7 @@ class HarmonicsTab(QWidget):
                 hh.plot_heating(self.plot_heat.figure, *last, window)
             self.plot_heat.draw()
         self.refresh_lists()
+        self.db.auto()
 
     # ================================================================ Hall
     def on_hall(self):
@@ -494,6 +555,7 @@ class HarmonicsTab(QWidget):
                 hh.plot_hall(self.plot_hall.figure, items, unit, bmin, col)
             self.plot_hall.draw()
         self.refresh_lists()
+        self.db.auto()
 
     def on_hall_clear(self):
         col = self.cb_hall_sig.currentText()

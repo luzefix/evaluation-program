@@ -92,6 +92,13 @@ CREATE TABLE IF NOT EXISTS curves (
     data    BLOB NOT NULL,
     PRIMARY KEY (measurement_id, name)
 );
+CREATE TABLE IF NOT EXISTS files (
+    measurement_id INTEGER NOT NULL REFERENCES measurements(id) ON DELETE CASCADE,
+    path  TEXT NOT NULL,
+    role  TEXT,
+    added TEXT,
+    PRIMARY KEY (measurement_id, path)
+);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 CREATE INDEX IF NOT EXISTS ix_meas_sample ON measurements(sample_id);
 CREATE INDEX IF NOT EXISTS ix_res_key ON results(key);
@@ -99,7 +106,7 @@ CREATE INDEX IF NOT EXISTS ix_res_key ON results(key);
 
 # fixed columns of Database.table(); everything else is a result or parameter
 BASE_COLUMNS = ["id", "sample", "sample_type", "technique", "label", "measured_at", "saved_at",
-                "material", "substrate", "orientation", "thickness_nm", "raw_path"]
+                "material", "substrate", "orientation", "thickness_nm", "raw_path", "files"]
 
 
 def _now() -> str:
@@ -137,6 +144,7 @@ class Curve:
     y: np.ndarray
     x_label: str = "x"
     y_label: str = "y"
+    single: bool = False     # store as float32 (7 digits; halves the size of noisy data)
 
 
 @dataclass
@@ -153,17 +161,19 @@ class Measurement:
     curves: list[Curve] = field(default_factory=list)
     notes: str = ""
     sample_type: str | None = None   # used only when the sample is created
+    files: list = field(default_factory=list)   # (role, path) of evaluated / exported files
 
 
-def _pack(x, y) -> bytes:
+def _pack(x, y, single=False) -> bytes:
     buf = io.BytesIO()
-    np.savez_compressed(buf, x=np.asarray(x, float), y=np.asarray(y, float))
+    dt = np.float32 if single else float
+    np.savez_compressed(buf, x=np.asarray(x, dt), y=np.asarray(y, dt))
     return buf.getvalue()
 
 
 def _unpack(blob: bytes):
     with np.load(io.BytesIO(blob)) as z:
-        return z["x"], z["y"]
+        return z["x"].astype(float), z["y"].astype(float)
 
 
 class Database:
@@ -283,8 +293,13 @@ class Database:
         """Insert a measurement. With ``replace`` an earlier entry with the same sample,
         technique, raw file and label is overwritten (re-analysis of the same file)."""
         sid = self.ensure_sample(m.sample, m.sample_type)
+        keep_files = []
         with self.con:
             if replace:
+                keep_files = self.con.execute(
+                    "SELECT f.role, f.path FROM files f JOIN measurements m ON m.id = f.measurement_id "
+                    "WHERE m.sample_id = ? AND m.technique = ? AND IFNULL(m.raw_path, '') = ? AND "
+                    "IFNULL(m.label, '') = ?", (sid, m.technique, m.raw_path or "", m.label or "")).fetchall()
                 self.con.execute(
                     "DELETE FROM measurements WHERE sample_id = ? AND technique = ? AND "
                     "IFNULL(raw_path, '') = ? AND IFNULL(label, '') = ?",
@@ -302,8 +317,21 @@ class Database:
                                  (mid, r.key, r.label or "", num, txt, _num(r.error), r.unit))
             for c in m.curves:
                 self.con.execute("INSERT OR REPLACE INTO curves VALUES (?, ?, ?, ?, ?)",
-                                 (mid, c.name, c.x_label, c.y_label, _pack(c.x, c.y)))
+                                 (mid, c.name, c.x_label, c.y_label, _pack(c.x, c.y, c.single)))
+        self.add_files(mid, [tuple(f) for f in keep_files] + list(m.files))
         return mid
+
+    def add_files(self, mid: int, files):
+        """Attach evaluated / exported files: iterable of (role, path)."""
+        with self.con:
+            for role, path in files:
+                if path:
+                    self.con.execute("INSERT OR REPLACE INTO files VALUES (?, ?, ?, ?)",
+                                     (int(mid), str(Path(path)), role, _now()))
+
+    def files(self, mid: int) -> list[tuple[str, str]]:
+        return [(r[0], r[1]) for r in self.con.execute(
+            "SELECT role, path FROM files WHERE measurement_id = ? ORDER BY added", (int(mid),))]
 
     def find_measurement(self, sample: str, technique: str, raw_path: str | None, label: str = ""):
         r = self.con.execute(
@@ -366,6 +394,9 @@ class Database:
                 wide = par.pivot_table(index="sample_id", columns="key", values="v", aggfunc="first")
                 wide = wide[sorted(wide.columns, key=str.lower)]
                 base = base.merge(wide, left_on="sample_id", right_index=True, how="left")
+        nf = pd.read_sql_query("SELECT measurement_id, COUNT(*) AS n FROM files GROUP BY measurement_id", self.con)
+        base.insert(len(BASE_COLUMNS) - 1, "files", base["id"].map(dict(zip(nf["measurement_id"], nf["n"])))
+                    .fillna(0).astype(int))
         base = base.drop(columns="sample_id")
         for c in base.columns[len(BASE_COLUMNS):]:
             conv = pd.to_numeric(base[c], errors="coerce")
