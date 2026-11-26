@@ -9,3 +9,4 @@ dist/
 .idea/
 .vscode/
 *.spec.bak
+tests/data/*.spm
