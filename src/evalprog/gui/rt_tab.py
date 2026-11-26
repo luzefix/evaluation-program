@@ -151,8 +151,8 @@ class RTTab(QWidget):
         self.redraw()
 
     def on_clear(self):
+        self.list.clear()          # first: clearing emits signals that still read the datasets
         self.datasets.clear()
-        self.list.clear()
         self.last = None
         self.marker = None
         self.redraw()

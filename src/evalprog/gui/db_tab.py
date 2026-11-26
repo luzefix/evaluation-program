@@ -107,6 +107,47 @@ def apply_filter(df: pd.DataFrame, col: str, op: str, value: str) -> pd.DataFram
     return df[m]
 
 
+SAMPLE_BASE = ["sample", "sample_type", "material", "substrate", "orientation", "thickness_nm",
+               "measurements", "techniques"]
+
+
+def per_sample(df: pd.DataFrame) -> pd.DataFrame:
+    """One row per sample. Results become '<technique>: <key>' (latest saved value of
+    that technique), synthesis parameters are taken once. Column 'ids' lists the
+    measurements that went into the row."""
+    if df.empty:
+        return pd.DataFrame(columns=SAMPLE_BASE + ["ids"])
+    res_cols = [c for c in df.columns[len(BASE_COLUMNS):] if not str(c).startswith("syn: ")]
+    syn_cols = [c for c in df.columns if str(c).startswith("syn: ")]
+    df = df.sort_values("saved_at", kind="stable")
+    rows = []
+    for sample, g in df.groupby("sample", sort=False):
+        first = g.iloc[0]
+        row = {"sample": sample, "sample_type": first["sample_type"], "material": first["material"],
+               "substrate": first["substrate"], "orientation": first["orientation"],
+               "thickness_nm": first["thickness_nm"], "measurements": len(g),
+               "techniques": ", ".join(sorted(g["technique"].unique())), "ids": list(g["id"])}
+        for tech, gt in g.groupby("technique", sort=True):
+            for c in res_cols:
+                s = gt[c].dropna()
+                if len(s):
+                    row[f"{tech}: {c}"] = s.iloc[-1]
+        for c in syn_cols:
+            s = g[c].dropna()
+            if len(s):
+                row[c] = s.iloc[0]
+        rows.append(row)
+    out = pd.DataFrame(rows)
+    rest = sorted([c for c in out.columns if c not in SAMPLE_BASE + ["ids"] and not c.startswith("syn: ")],
+                  key=str.lower)
+    out = out[SAMPLE_BASE + ["ids"] + rest + [c for c in syn_cols if c in out.columns]]
+    for c in rest:
+        conv = pd.to_numeric(out[c], errors="coerce")
+        if conv.notna().sum() == out[c].notna().sum():
+            out[c] = conv
+    return out
+
+
 class FilterRow(QWidget):
     changed = Signal()
     removed = Signal(object)
@@ -346,6 +387,10 @@ class DatabaseTab(QWidget):
         b_reload.clicked.connect(self.reload)
         lay.addWidget(group("Database", [self.lbl_db, hbox(b_db, b_reload)]))
 
+        self.cb_view = combo(["per measurement", "per sample"])
+        self.cb_view.setToolTip("per sample: one row per sample, results as '<technique>: <quantity>' "
+                                "(latest saved value), synthesis parameters once")
+        self.cb_view.currentIndexChanged.connect(self._on_view)
         self.cb_tech = combo(["all"] + TECHNIQUES)
         self.cb_stype = combo(["all"] + SAMPLE_TYPES)
         self.ed_search = QLineEdit()
@@ -365,7 +410,7 @@ class DatabaseTab(QWidget):
         fw.setLayout(self.filter_box)
         b_add = QPushButton("+ parameter filter")
         b_add.clicked.connect(self.add_filter)
-        lay.addWidget(group("Filter", [("Technique", self.cb_tech), ("Sample type", self.cb_stype),
+        lay.addWidget(group("Filter", [("View", self.cb_view), ("Technique", self.cb_tech), ("Sample type", self.cb_stype),
                                        ("Search", self.ed_search), fw, b_add, self.chk_empty, self.chk_syn]))
 
         self.cb_curve = combo([])
@@ -456,15 +501,26 @@ class DatabaseTab(QWidget):
         cols = list(self.full.columns)
         for f in self.filters:
             f.set_columns(cols)
-        num = [c for c in cols if pd.api.types.is_numeric_dtype(self.full[c]) and c != "id"]
+        self.refilter()
+
+    def per_sample_mode(self) -> bool:
+        return self.cb_view.currentIndex() == 1
+
+    def _on_view(self, *_):
+        self.cb_group.setCurrentText("material" if self.per_sample_mode() else "sample")
+        self.refilter()
+
+    def _update_axes(self, df):
+        num = [c for c in df.columns if c not in ("id", "files", "measurements", "ids")
+               and pd.api.types.is_numeric_dtype(df[c])]
+        dates = [] if self.per_sample_mode() else ["measured_at", "saved_at"]
         for cb, default in ((self.cb_x, "syn: T_Dep"), (self.cb_y, "c")):
             cur = cb.currentText() or default
             cb.blockSignals(True)
             cb.clear()
-            cb.addItems(["measured_at", "saved_at"] + num)
+            cb.addItems(dates + num)
             cb.setCurrentText(cur)
             cb.blockSignals(False)
-        self.refilter()
 
     def filtered(self) -> pd.DataFrame:
         df = self.full
@@ -488,19 +544,29 @@ class DatabaseTab(QWidget):
 
     def refilter(self, *_):
         df = self.filtered()
+        nmeas = len(df)
+        base = BASE_COLUMNS
+        if self.per_sample_mode():
+            df = per_sample(df)
+            base = SAMPLE_BASE + ["ids"]
         if not self.chk_syn.isChecked():
             df = df[[c for c in df.columns if not str(c).startswith("syn: ")]]
         if self.chk_empty.isChecked() and len(df):
-            keep = [c for c in df.columns if c in BASE_COLUMNS or df[c].notna().any()]
+            keep = [c for c in df.columns if c in base or df[c].notna().any()]
             df = df[keep]
         self.model.set_frame(df)
         self.view.resizeColumnsToContents()
         for i in range(self.model.columnCount()):
             if self.view.columnWidth(i) > 260:
                 self.view.setColumnWidth(i, 260)
-        self.view.setColumnHidden(0, True)
-        self.lbl_count.setText(f"{len(df)} of {len(self.full)} measurements — click a header to sort, "
-                               f"double-click a row to edit the sample")
+            self.view.setColumnHidden(i, str(df.columns[i]) in ("id", "ids"))
+        if self.per_sample_mode():
+            self.lbl_count.setText(f"{len(df)} samples ({nmeas} of {len(self.full)} measurements) — "
+                                   f"columns '<technique>: <quantity>' show the latest saved value")
+        else:
+            self.lbl_count.setText(f"{len(df)} of {len(self.full)} measurements — click a header to sort, "
+                                   f"double-click a row to edit the sample")
+        self._update_axes(df)
         self._update_curve_names()
 
     def add_filter(self):
@@ -516,9 +582,18 @@ class DatabaseTab(QWidget):
         f.deleteLater()
         self.refilter()
 
-    def selected(self) -> pd.DataFrame:
+    def selected_rows(self) -> pd.DataFrame:
+        """Selected rows as shown (measurements or samples)."""
         rows = sorted({i.row() for i in self.view.selectionModel().selectedRows()})
         return self.model.df.iloc[rows] if rows else self.model.df.iloc[[]]
+
+    def selected(self) -> pd.DataFrame:
+        """Selected measurements (in sample view: all filtered measurements of the selected samples)."""
+        sel = self.selected_rows()
+        if not self.per_sample_mode():
+            return sel
+        ids = [i for lst in sel.get("ids", []) for i in lst]
+        return self.full[self.full["id"].isin(ids)]
 
     def _update_curve_names(self, *_):
         sel = self.selected()
@@ -578,13 +653,19 @@ class DatabaseTab(QWidget):
         self.plot.draw()
 
     def on_scatter(self):
-        df = self.selected() if self.chk_sel.isChecked() else self.model.df
         xc, yc = self.cb_x.currentText(), self.cb_y.currentText()
-        if xc not in self.full.columns or yc not in self.full.columns:
-            QMessageBox.information(self, "Plot", "Choose existing columns for x and y.")
-            return
-        # take values from the full table (the column may be hidden in the view)
-        d = self.full.set_index("id").loc[df["id"]] if len(df) else self.full.iloc[[]]
+        if self.per_sample_mode():
+            d = self.selected_rows() if self.chk_sel.isChecked() else self.model.df
+            if xc not in d.columns or yc not in d.columns:
+                QMessageBox.information(self, "Plot", "Choose existing columns for x and y.")
+                return
+        else:
+            df = self.selected() if self.chk_sel.isChecked() else self.model.df
+            if xc not in self.full.columns or yc not in self.full.columns:
+                QMessageBox.information(self, "Plot", "Choose existing columns for x and y.")
+                return
+            # take values from the full table (the column may be hidden in the view)
+            d = self.full.set_index("id").loc[df["id"]] if len(df) else self.full.iloc[[]]
         x = pd.to_datetime(d[xc], errors="coerce") if xc in ("measured_at", "saved_at") else \
             pd.to_numeric(d[xc], errors="coerce")
         y = pd.to_numeric(d[yc], errors="coerce")
@@ -705,7 +786,7 @@ class DatabaseTab(QWidget):
     def on_export(self):
         p, _ = QFileDialog.getSaveFileName(self, "Export table", str(Path.home() / "database.csv"), "CSV (*.csv)")
         if p:
-            self.model.df.to_csv(p, index=False)
+            self.model.df.drop(columns=["ids"], errors="ignore").to_csv(p, index=False)
 
     def on_change_db(self):
         p, _ = QFileDialog.getSaveFileName(self, "Database file (existing or new)", str(current_db().path),

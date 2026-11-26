@@ -382,6 +382,7 @@ class Database:
         res = pd.read_sql_query("SELECT measurement_id, key, label, value, text FROM results", self.con)
         if len(res):
             res["col"] = [result_column(k, lab) for k, lab in zip(res["key"], res["label"])]
+            res.loc[res["col"].isin(BASE_COLUMNS + ["sample_id"]), "col"] = "result: " + res["col"]
             res["v"] = res["value"].astype(object).where(res["value"].notna(), res["text"])
             wide = res.pivot_table(index="measurement_id", columns="col", values="v", aggfunc="first")
             wide = wide[sorted(wide.columns, key=str.lower)]

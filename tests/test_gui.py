@@ -213,6 +213,19 @@ def test_database(window, tmp_path):
     dbt.cb_y.setCurrentText("Tc_mid")
     dbt.on_scatter()
     dbt.plot.figure.savefig(tmp_path / "db.png")
+    # one row per sample
+    dbt.cb_view.setCurrentText("per sample")
+    df = dbt.model.df
+    row = df[df["sample"] == "CIO9"].iloc[0]
+    assert "XRD" in row["techniques"] and "R(T)" in row["techniques"]
+    assert row["R(T): Tc_mid"] == pytest.approx(30.0, abs=0.5)
+    assert any(c.startswith("XRD: c [") for c in df.columns)
+    dbt.cb_x.setCurrentText("syn: T_Dep")
+    dbt.cb_y.setCurrentText("R(T): Tc_mid")
+    dbt.on_scatter()
+    dbt.view.selectRow(int(df.index[df["sample"] == "CIO9"][0]))
+    assert len(dbt.selected()) == row["measurements"]
+    dbt.cb_view.setCurrentText("per measurement")
     # exported files are referenced, automatic saving is armed after an evaluation
     csv = tmp_path / "CIO9_xrd_results.csv"
     csv.write_text("x")
