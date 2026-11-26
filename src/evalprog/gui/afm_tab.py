@@ -31,6 +31,7 @@ class AFMTab(QWidget):
         self.profile = None         # (s, h, p0, p1)
         self.prof_steps = None      # afm.ProfileSteps
         self.levelfit = None        # afm.LevelFit
+        self.auto = None            # afm.AutoProfile
         self.roi = None             # (x0, x1, y0, y1) in nm
         self.results = []
         self._drag = None
@@ -52,6 +53,9 @@ class AFMTab(QWidget):
         self.sp_scar = spin(3.0, 0.5, 50, 1, 0.5, " σ")
         self.sp_scar_len = ispin(12, 1, 10000)
         self.cb_bg = combo(afm.BACKGROUNDS, "plane")
+        self.cb_bow = combo(["0", "2", "3"], "2")
+        self.cb_bow.setToolTip("Only for 'terraces (facet level)': 2D polynomial (piezo bow) fitted "
+                               "inside the terraces with an own offset per terrace; 0 = off")
         self.cb_rows = combo(ROWS, "median")
         self.chk_mask = QCheckBox("Exclude pits/particles from fits")
         self.chk_mask.setChecked(True)
@@ -65,11 +69,12 @@ class AFMTab(QWidget):
             w.toggled.connect(self.apply)
         for w in (self.sp_scar, self.sp_scar_len, self.sp_mask, self.sp_outl, self.sp_smooth):
             w.valueChanged.connect(self.apply)
-        for w in (self.cb_bg, self.cb_rows, self.cb_zero, self.cb_smooth):
+        for w in (self.cb_bg, self.cb_bow, self.cb_rows, self.cb_zero, self.cb_smooth):
             w.currentIndexChanged.connect(self.apply)
         lay.addWidget(group("Corrections (applied in this order)", [
             self.chk_scars, ("Scar threshold / min. length", hbox(self.sp_scar, self.sp_scar_len)),
-            ("Background", self.cb_bg), ("Line alignment", self.cb_rows),
+            ("Background", self.cb_bg), ("Terrace bow order", self.cb_bow),
+            ("Line alignment", self.cb_rows),
             self.chk_mask, ("Mask threshold", self.sp_mask),
             self.chk_outl, ("Spike threshold", self.sp_outl),
             ("Smoothing (σ / window)", hbox(self.cb_smooth, self.sp_smooth)),
@@ -100,7 +105,11 @@ class AFMTab(QWidget):
         self.sp_bins = ispin(300, 20, 5000)
         self.sp_prom = spin(5.0, 0.5, 90, 1, 1, " %")
         self.chk_relevel = QCheckBox("Re-level terraces inside region")
-        self.sp_minstep = spin(0.2, 0.001, 100, 3, 0.05, " nm")
+        self.sp_minstep = spin(0.195, 0.001, 100, 3, 0.05, " nm")
+        self.btn_auto = QPushButton("Profile ⟂ steps (auto)")
+        self.btn_auto.setToolTip("Line through the centre perpendicular to the step edges "
+                                 "(structure tensor), width = 0.4 × terrace width")
+        self.btn_auto.clicked.connect(self.on_auto_profile)
         self.sp_edge = spin(30.0, 0, 1e4, 1, 5, " nm")
         for w in (self.sp_ref, self.sp_bins, self.sp_prom):
             w.valueChanged.connect(self.analyse)
@@ -109,6 +118,7 @@ class AFMTab(QWidget):
             w.valueChanged.connect(self._width_changed)
         lay.addWidget(group("Steps and terraces", [
             ("Mouse in image", hbox(self.cb_mouse, self.btn_clear_roi)),
+            self.btn_auto,
             info_label("Profile line: drag across the steps (perpendicular). The profile is "
                        "averaged over 'width' pixels along the steps and fitted with a "
                        "staircase. Region: the histogram and the level fit use only the "
@@ -214,7 +224,8 @@ class AFMTab(QWidget):
             rows=self.cb_rows.currentText(), mask_features=self.chk_mask.isChecked(),
             mask_sigma=self.sp_mask.value(), outliers=self.chk_outl.isChecked(),
             outlier_sigma=self.sp_outl.value(), smooth=self.cb_smooth.currentText(),
-            smooth_nm=self.sp_smooth.value(), zero=self.cb_zero.currentText())
+            smooth_nm=self.sp_smooth.value(), zero=self.cb_zero.currentText(),
+            terrace_bow=int(self.cb_bow.currentText()))
 
     def apply(self, *_):
         if self.channel is None:
@@ -283,6 +294,12 @@ class AFMTab(QWidget):
         if self.profile is not None:
             s_, h_ = self.profile[0], self.profile[1]
             rows.append(("Profile length", s_[-1], "", "nm", f"width {self.sp_width.value()} px"))
+            if self.auto is not None and self.auto.p0 == self.profile[2]:
+                sd = self.auto.steps
+                rows.append(("Step normal (auto)", sd.angle_deg, "", "deg",
+                             f"coherence {sd.coherence:.2f}; 0° = +x, 90° = down"))
+                rows.append(("Terrace width (mean slope)", sd.terrace_nm, "", "nm",
+                             f"reference step / mean slope; miscut {sd.miscut_deg:.3f}°"))
             ps = self.prof_steps
             if ps is not None and len(ps.heights):
                 for k, (e_, hgt, err) in enumerate(zip(ps.edges, ps.heights, ps.errors)):
@@ -382,6 +399,20 @@ class AFMTab(QWidget):
         self.roi = None
         self.analyse()
 
+    def on_auto_profile(self):
+        if self.result is None:
+            return
+        try:
+            ap = afm.auto_profile(self.result.z, self.channel.dx, self.channel.dy)
+        except Exception as exc:
+            show_error(self, "Automatic profile", exc)
+            return
+        self.auto = ap
+        self.sp_width.blockSignals(True)
+        self.sp_width.setValue(ap.width_px)
+        self.sp_width.blockSignals(False)
+        self.set_profile(ap.p0, ap.p1)
+
     def set_profile(self, p0_nm, p1_nm):
         self._compute_profile(p0_nm, p1_nm)
         self.analyse()
@@ -396,7 +427,8 @@ class AFMTab(QWidget):
                                 width=self.sp_width.value())
         self.profile = (s, h, p0, p1)
         try:
-            self.prof_steps = afm.profile_steps(s, h, self.sp_minstep.value(), self.sp_edge.value())
+            self.prof_steps = afm.profile_steps(s, h, self.sp_minstep.value(), self.sp_edge.value(),
+                                                reference_step=self.sp_ref.value())
         except Exception:
             self.prof_steps = None
 

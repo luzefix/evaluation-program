@@ -139,11 +139,21 @@ All results go to `<measurement folder>/output/` (CSV with Origin header lines) 
   With *terraces* + *median of differences* the final line offsets and the terrace
   slope are fitted jointly (z = c_terrace + r_line + a·x, edges excluded), so the line
   offsets do not drift like a pure line-to-line alignment does on noisy images.
+  *Terrace bow order* (2 or 3, default 2; 0 = off) adds a 2D polynomial to that fit
+  (piezo bow / sample bending). Its curvature is measured inside the terraces, with
+  one free offset per terrace, so the staircase itself is kept. If the step edges are
+  not resolved (one terrace region covers more than half of the image) the bow is
+  skipped and the log says so.
 * **Step heights of substrates** (e.g. BOE-terminated SrTiO3):
   * *profile line* mode: drag across the steps; *profile width* averages along the step
-    edges (dashed band). The profile is fitted with a staircase
-    h = a + b·s + Σ H_k·Θ(s − e_k) (edge zones excluded, residual tilt b free):
-    every step height ± error, mean |step| ± std/√N, terrace width and miscut angle;
+    edges (dashed band). **Profile ⟂ steps (auto)** sets the line through the image
+    centre perpendicular to the step edges (structure tensor of the step-edge
+    gradients) and the width to 0.4 × terrace width (terrace width = reference
+    step / mean slope), narrow enough that meandering edges are not smeared.
+    The profile is fitted with a staircase h = a + b·s + Σ H_k·Θ(s − e_k) (edge zones
+    excluded, residual tilt b free); fitted steps below min. step/2 and pits/islands
+    (two opposite edges returning to the same level) are dropped. Result: every step
+    height ± error, mean |step| ± std/√N, terrace width and miscut angle;
   * *region* mode: drag a rectangle over a few clean terraces; the height histogram of
     the region is fitted with one Gaussian per level, the level spacing gives the step
     heights and a linear fit L = L0 + n·d over all levels gives one step height ± error

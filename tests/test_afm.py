@@ -119,3 +119,55 @@ def test_smoothing_keeps_levels():
     assert zs[:, :40].mean() == pytest.approx(0.0, abs=0.02)
     assert zs[:, 60:].mean() == pytest.approx(1.0, abs=0.02)
     assert zs[:, :40].std() < 0.05
+
+
+def test_terrace_bow_removed():
+    z, true, dx = _noisy_terraces()
+    n = z.shape[0]
+    X, Y = np.meshgrid(np.linspace(-1, 1, n), np.linspace(-1, 1, n))
+    z = z + 1.0 * (X ** 2 + Y ** 2)            # 2 nm quadratic bow (centre to corner)
+    base = dict(background="terraces (facet level)", rows="median of differences",
+                smooth="gaussian", smooth_nm=8)
+    r = afm.correct(z, afm.Corrections(**base, terrace_bow=2), dx, dx)
+    lf = afm.fit_levels(afm.height_histogram(r.z, bins=400), 0.3905)
+    assert len(lf.centers) >= 6
+    assert lf.ladder["step"] == pytest.approx(0.3905, abs=0.01)
+    # without the bow correction the terrace levels are smeared out
+    r0 = afm.correct(z, afm.Corrections(**base, terrace_bow=0), dx, dx)
+    assert afm.roughness(r0.z - r.z)["Sq"] > 0.1
+
+
+def test_ladder_fit_never_raises():
+    c = np.array([0.0, 0.39, 0.78, 1.17])
+    for e in (np.zeros(4), np.full(4, np.inf), np.array([0.0, np.nan, 1e-3, np.inf])):
+        lad = afm._ladder_fit(c, e, 0.3905)
+        assert lad == {} or lad["step"] == pytest.approx(0.39, abs=1e-3)
+    assert afm._ladder_fit(np.array([0.0, 0.01]), np.ones(2), 0.3905) == {}
+
+
+def test_step_direction_and_auto_profile():
+    z, true, dx = _noisy_terraces()
+    r = afm.correct(z, afm.Corrections(background="terraces (facet level)",
+                                       rows="median of differences", smooth="gaussian",
+                                       smooth_nm=8), dx, dx)
+    sd = afm.step_direction(r.z, dx, dx)
+    # synthetic steps go down along +x → uphill normal is −x
+    assert sd.direction[0] == pytest.approx(-1.0, abs=0.02)
+    assert sd.terrace_nm == pytest.approx(250, rel=0.1)
+    ap = afm.auto_profile(r.z, dx, dx, sd=sd)
+    assert ap.width_px == int(np.clip(round(0.4 * sd.terrace_nm / dx), 3, 51))
+    s, h = afm.line_profile(r.z, dx, dx, ap.p0, ap.p1, width=ap.width_px)
+    assert s[-1] == pytest.approx(0.8 * 2000, rel=0.02)
+    ps = afm.profile_steps(s, h, edge_exclusion_nm=60)
+    assert len(ps.heights) >= 5
+    assert np.mean(ps.heights) == pytest.approx(0.3905, abs=0.03)
+
+
+def test_profile_steps_ignores_pits():
+    s = np.arange(0, 2000, 4.0)
+    h = 0.3905 * np.floor(s / 400)
+    h[(s > 560) & (s < 640)] -= 0.4               # a pit crossed by the profile
+    h += np.random.default_rng(3).normal(0, 0.02, s.size)
+    ps = afm.profile_steps(s, h, edge_exclusion_nm=30)
+    assert len(ps.heights) == 4
+    assert np.allclose(ps.heights, 0.3905, atol=0.03)

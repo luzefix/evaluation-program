@@ -143,3 +143,8 @@ def test_afm_tab(window, tmp_path):
     assert tab.levelfit.ladder["step"] == pytest.approx(0.3905, abs=0.04)
     tab.plot_hist.figure.savefig(tmp_path / "afm_hist.png")
     tab.clear_roi()
+    tab.cb_bow.setCurrentText("3")
+    tab.on_auto_profile()
+    assert tab.profile is not None and tab.auto is not None
+    assert tab.sp_width.value() == tab.auto.width_px
+    assert abs(tab.auto.steps.direction[0]) > 0.9   # synthetic steps run along y

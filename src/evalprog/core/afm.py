@@ -32,6 +32,7 @@ heights), line profiles, 1D power spectral density, pit / island statistics.
 from __future__ import annotations
 
 import re
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -355,50 +356,79 @@ def _terrace_slopes(z, ok, min_px=50):
     return float(c[0]), float(c[1])
 
 
-def level_terraces(z, mask=None, iterations=4, smooth_px=2.0, edge_sigma=2.0, fit_rows=False):
+def _terrace_pixels(z, mask=None, smooth_px=2.0, edge_sigma=2.0):
+    """Pixels away from step edges (and outside ``mask``). Edges are pixels whose
+    gradient magnitude (of a smoothed copy, relative to the median gradient) deviates
+    by > edge_sigma·σ from the typical value, dilated by 3× the smoothing width so
+    that their tails are also excluded. Returns (ok, gx, gy) with gradients per pixel."""
+    zs = ndimage.gaussian_filter(z, smooth_px, mode="nearest") if smooth_px else z
+    gy, gx = np.gradient(zs)
+    gx0, gy0 = np.median(gx), np.median(gy)
+    mag = np.hypot(gx - gx0, gy - gy0)
+    edge = mag > np.median(mag) + edge_sigma * (robust_sigma(mag) or 1e-12)
+    edge = ndimage.binary_dilation(edge, iterations=max(1, int(round(3 * smooth_px))))
+    ok = ~edge
+    if mask is not None:
+        ok &= ~mask
+    if ok.sum() < 0.05 * z.size:
+        ok = np.ones_like(ok) if mask is None else ~mask
+    return ok, gx, gy
+
+
+def level_terraces(z, mask=None, iterations=4, smooth_px=2.0, edge_sigma=2.0, fit_rows=False,
+                   bow_order=0, info=None):
     """Facet levelling: remove the plane whose slope equals the slope of the
     terraces. On vicinal (stepped) surfaces the terraces end up horizontal, while a
     least-squares plane would tilt them by the miscut angle.
 
     The terrace slope is the mean gradient of a smoothed copy outside the step
-    edges; edges are pixels whose gradient magnitude deviates by > edge_sigma·σ from
-    the typical value, dilated by the smoothing width so that their tails are also
-    excluded (otherwise noisy images give a slope biased towards the miscut).
+    edges (see ``_terrace_pixels``; otherwise noisy images give a slope biased
+    towards the miscut).
 
-    ``fit_rows``: also determine the line offsets from the terraces (see
-    ``_terrace_row_offsets``)."""
+    ``fit_rows``: also determine the line offsets from the terraces;
+    ``bow_order`` (2 or 3): also remove a 2D polynomial background (piezo bow,
+    sample bending) whose curvature is measured *inside* the terraces, with an own
+    offset per terrace (see ``_terrace_model_fit``). A plain polynomial fit would
+    flatten the staircase itself; this one keeps the steps. If the step edges are
+    not resolved (one terrace region covers most of the image) the bow is skipped;
+    ``info`` (dict) then gets 'bow_skipped' = True."""
     z = np.array(z, float)
     ny, nx = z.shape
     y, x = np.mgrid[:ny, :nx]
-    grow = max(1, int(round(3 * smooth_px)))
     for _ in range(iterations):
-        zs = ndimage.gaussian_filter(z, smooth_px, mode="nearest") if smooth_px else z
-        gy, gx = np.gradient(zs)
-        gx0, gy0 = np.median(gx), np.median(gy)
-        mag = np.hypot(gx - gx0, gy - gy0)
-        edge = mag > np.median(mag) + edge_sigma * (robust_sigma(mag) or 1e-12)
-        edge = ndimage.binary_dilation(edge, iterations=grow)
-        ok = ~edge
-        if mask is not None:
-            ok &= ~mask
-        if ok.sum() < 0.05 * z.size:
-            ok = np.ones_like(ok) if mask is None else ~mask
+        ok, gx, gy = _terrace_pixels(z, mask, smooth_px, edge_sigma)
         sx, sy = _terrace_slopes(z, ok)
         if sx is None:
             sx, sy = float(np.mean(gx[ok])), float(np.mean(gy[ok]))
         z -= sx * x + sy * y
         if abs(sx) < 1e-9 and abs(sy) < 1e-9:
             break
-    if fit_rows:
-        z = _terrace_row_offsets(z, ok)
+    bow = int(bow_order) if bow_order and int(bow_order) >= 2 else 0
+    if fit_rows or bow:
+        for k in range(2 if bow else 1):
+            if k:  # edges are found more reliably once the bow is gone
+                ok, _, _ = _terrace_pixels(z, mask, smooth_px, edge_sigma)
+            z = _terrace_model_fit(z, ok, rows=fit_rows, order=bow or 1, info=info)
     return z - np.nanmedian(z)
 
 
-def _terrace_row_offsets(z, ok, min_px=50, max_points=300_000):
-    """Joint least-squares fit z = c_k(terrace) + r_i(line) + a·x on the pixels away
-    from step edges (sparse solver). Line offsets referenced to whole terraces do
-    not accumulate noise the way the line-to-line 'median of differences' does,
-    which is a random walk over the image."""
+def _terrace_model_fit(z, ok, rows=True, order=1, min_px=50, max_points=300_000, info=None,
+                       max_region=0.5):
+    """Joint least-squares fit z = c_k(terrace) [+ r_i(line)] + P(x, y) on the pixels
+    away from step edges (sparse solver) and subtraction of r_i and P.
+
+    * c_k: one free offset per connected terrace region, so the staircase itself is
+      not part of the background;
+    * r_i (``rows``): line offsets referenced to whole terraces – they do not
+      accumulate noise the way the line-to-line 'median of differences' does (a
+      random walk over the image);
+    * P: 2D polynomial of ``order`` without constant and linear terms (except x with
+      line offsets); with line offsets the pure-y terms are left out (r_i already
+      contains any function of y).
+    Curvature terms (order ≥ 2) are only fitted when the largest terrace region holds
+    less than ``max_region`` of the terrace pixels – otherwise the edges are not
+    resolved, the regions span several steps and the polynomial would flatten the
+    staircase."""
     from scipy.sparse import coo_matrix
     from scipy.sparse.linalg import lsqr
 
@@ -411,6 +441,12 @@ def _terrace_row_offsets(z, ok, min_px=50, max_points=300_000):
     sel = keep[lab]
     if sel.mean() < 0.2:
         return z
+    if order >= 2 and cnt[keep].max() > max_region * cnt[keep].sum():
+        order = 1
+        if info is not None:
+            info["bow_skipped"] = True
+    if not rows and order < 2:
+        return z
     ny, nx = z.shape
     ii, jj = np.nonzero(sel)
     if ii.size > max_points:
@@ -420,20 +456,45 @@ def _terrace_row_offsets(z, ok, min_px=50, max_points=300_000):
     remap[keep] = np.arange(keep.sum())
     k = remap[lab[ii, jj]]
     nk = int(keep.sum())
+    nr = ny if rows else 0
     m = ii.size
-    xs = (jj - nx / 2) / nx
-    rows = np.concatenate([np.arange(m)] * 3)
-    cols = np.concatenate([k, nk + ii, np.full(m, nk + ny)])
-    vals = np.concatenate([np.ones(m), np.ones(m), xs])
-    A = coo_matrix((vals, (rows, cols)), shape=(m, nk + ny + 1)).tocsr()
+    X = np.linspace(-1, 1, nx)
+    Y = np.linspace(-1, 1, ny)
+    # linear terms: only x with line offsets (as before); the plane itself is set by the
+    # facet levelling – a free plane here could absorb the miscut ramp of the
+    # staircase where step edges are not detected and terraces merge
+    powers = [(p - q, q) for p in range(1, int(order) + 1) for q in range(p + 1)
+              if not (rows and p - q == 0) and (p >= 2 or (rows and q == 0))]
+    r_idx, c_idx, vals = [np.arange(m)], [k], [np.ones(m)]
+    if rows:
+        r_idx.append(np.arange(m))
+        c_idx.append(nk + ii)
+        vals.append(np.ones(m))
+    for t, (px, py) in enumerate(powers):
+        r_idx.append(np.arange(m))
+        c_idx.append(np.full(m, nk + nr + t))
+        vals.append(X[jj] ** px * Y[ii] ** py)
+    A = coo_matrix((np.concatenate(vals), (np.concatenate(r_idx), np.concatenate(c_idx))),
+                   shape=(m, nk + nr + len(powers))).tocsr()
     sol = lsqr(A, z[ii, jj], damp=1e-6, atol=1e-10, btol=1e-10, iter_lim=5000)[0]
-    r = sol[nk:nk + ny]
-    a = sol[-1] / nx
-    seen = np.zeros(ny, bool)
-    seen[np.unique(ii)] = True
-    if not seen.all():  # lines without terrace pixels: interpolate
-        r[~seen] = np.interp(np.flatnonzero(~seen), np.flatnonzero(seen), r[seen])
-    return z - r[:, None] - a * (np.arange(nx) - nx / 2)[None, :]
+    out = z.copy()
+    if rows:
+        r = sol[nk:nk + ny]
+        seen = np.zeros(ny, bool)
+        seen[np.unique(ii)] = True
+        if not seen.all():  # lines without terrace pixels: interpolate
+            r[~seen] = np.interp(np.flatnonzero(~seen), np.flatnonzero(seen), r[seen])
+        out -= r[:, None]
+    if powers:
+        XX, YY = np.meshgrid(X, Y)
+        out -= sum(c * XX ** px * YY ** py for c, (px, py) in zip(sol[nk + nr:], powers))
+    return out
+
+
+def _terrace_row_offsets(z, ok, min_px=50, max_points=300_000):
+    """Line offsets + linear x term referenced to the terraces (kept for
+    compatibility, see ``_terrace_model_fit``)."""
+    return _terrace_model_fit(z, ok, rows=True, order=1, min_px=min_px, max_points=max_points)
 
 
 ROW_METHODS = ("median", "median of differences", "mean", "linear", "quadratic")
@@ -452,11 +513,10 @@ def align_rows(z, method="median", mask=None):
     z = np.array(z, float)
     m = np.zeros(z.shape, bool) if mask is None else mask
     zm = np.where(m, np.nan, z)
-    if method == "median":
-        off = np.nanmedian(zm, axis=1)
-        return z - np.nan_to_num(off)[:, None]
-    if method == "mean":
-        off = np.nanmean(zm, axis=1)
+    if method in ("median", "mean"):
+        with warnings.catch_warnings():  # fully masked lines → offset 0
+            warnings.simplefilter("ignore", RuntimeWarning)
+            off = (np.nanmedian if method == "median" else np.nanmean)(zm, axis=1)
         return z - np.nan_to_num(off)[:, None]
     if method == "median of differences":
         # ignore step edges (from the fast-axis gradient, which line offsets do not
@@ -468,7 +528,9 @@ def align_rows(z, method="median", mask=None):
         edge = ndimage.binary_dilation(edge, structure=np.ones((3, 9), bool))
         if (~edge).mean() > 0.3:
             zm = np.where(edge, np.nan, zm)
-        d = np.nanmedian(zm[1:] - zm[:-1], axis=1)
+        with warnings.catch_warnings():  # all-NaN lines (fully masked) → offset 0
+            warnings.simplefilter("ignore", RuntimeWarning)
+            d = np.nanmedian(zm[1:] - zm[:-1], axis=1)
         d = np.nan_to_num(d)
         off = np.concatenate([[0.0], np.cumsum(d)])
         return z - off[:, None]
@@ -593,6 +655,7 @@ class Corrections:
     smooth: str = "none"            # 'none', 'gaussian', 'median'
     smooth_nm: float = 0.0          # Gaussian σ or median window (nm)
     zero: str = "median"
+    terrace_bow: int = 2            # polynomial bow order for 'terraces' (0 = off, 2, 3)
 
 
 @dataclass
@@ -611,6 +674,7 @@ def correct(z, c: Corrections = Corrections(), dx=None, dy=None) -> Corrected:
     ``dx``, ``dy`` (nm/pixel) are needed for smoothing only."""
     z = np.array(z, float)
     log = []
+    info = {}
 
     def level(z, mask):
         if c.background == "plane":
@@ -618,13 +682,14 @@ def correct(z, c: Corrections = Corrections(), dx=None, dy=None) -> Corrected:
         elif c.background.startswith("polynomial"):
             z = level_polynomial(z, int(c.background.split()[-1]), mask)
         elif c.background.startswith("terraces"):
+            bow = int(c.terrace_bow or 0)
             if c.rows and c.rows != "none":
                 # line offsets would otherwise look like step edges in dz/dy
                 z = align_rows(z, c.rows, mask)
             if c.rows == "median of differences":
                 # final line offsets referenced to the terraces (no random walk)
-                return level_terraces(z, mask, fit_rows=True)
-            z = level_terraces(z, mask)
+                return level_terraces(z, mask, fit_rows=True, bow_order=bow, info=info)
+            z = level_terraces(z, mask, bow_order=bow, info=info)
         if c.rows and c.rows != "none":
             z = align_rows(z, c.rows, mask)
         return z
@@ -648,7 +713,10 @@ def correct(z, c: Corrections = Corrections(), dx=None, dy=None) -> Corrected:
             z = level(base, mask)
         log.append(f"feature mask: {100 * mask.mean():.1f} % of the image excluded from fits")
     if c.background != "none":
-        log.append(f"background: {c.background}")
+        bow = int(c.terrace_bow or 0) if c.background.startswith("terraces") else 0
+        log.append(f"background: {c.background}" + (f", terrace bow order {bow}" if bow >= 2 else ""))
+        if bow >= 2 and info.get("bow_skipped"):
+            log.append("terrace bow skipped: step edges not resolved (terraces merge)")
     if c.rows and c.rows != "none":
         log.append(f"line alignment: {c.rows}")
     outl = np.zeros(z.shape, bool)
@@ -931,21 +999,40 @@ def fit_levels(hist: Histogram, reference_step=None) -> LevelFit | None:
     amps = p[0:-1:3][order]
     steps = np.diff(centers)
     serr = np.hypot(cerr[1:], cerr[:-1])
-    ladder = {}
-    if reference_step and len(centers) >= 2:
-        n = np.round((centers - centers[0]) / reference_step).astype(int)
-        if len(np.unique(n)) >= 2:
-            w = 1 / np.maximum(cerr, 1e-12) ** 2
-            A = np.c_[np.ones_like(n, float), n]
-            W = np.diag(w)
-            cov_l = np.linalg.inv(A.T @ W @ A)
-            coef = cov_l @ A.T @ W @ centers
-            res = centers - A @ coef
-            dof = len(centers) - 2
-            scale = max(1.0, float(res @ W @ res) / dof) if dof > 0 else 1.0
-            ladder = {"step": float(coef[1]), "error": float(np.sqrt(cov_l[1, 1] * scale)),
-                      "n": n.tolist()}
+    ladder = _ladder_fit(centers, cerr, reference_step, floor=bw / 10)
     return LevelFit(centers, cerr, widths, amps, steps, serr, _gauss_sum(x, *p), ladder)
+
+
+def _ladder_fit(centers, cerr, reference_step, floor=1e-6) -> dict:
+    """Weighted straight line L = L0 + n·d over all levels (n = integer number of
+    reference steps). Centre errors are floored (a fit at a bound can return 0 or
+    inf/NaN), the normal equations are solved with a pseudo-inverse; on any failure
+    an empty dict is returned instead of raising."""
+    if not reference_step or len(centers) < 2:
+        return {}
+    try:
+        n = np.round((centers - centers[0]) / reference_step).astype(int)
+        if len(np.unique(n)) < 2:
+            return {}
+        e = np.asarray(cerr, float).copy()
+        e[~np.isfinite(e)] = np.nan
+        typical = np.nanmedian(e) if np.isfinite(e).any() else floor
+        e = np.where(np.isfinite(e), e, max(typical, floor) * 10)
+        e = np.maximum(e, max(floor, 1e-6))
+        w = 1 / e ** 2
+        A = np.c_[np.ones_like(n, float), n]
+        W = np.diag(w)
+        cov_l = np.linalg.pinv(A.T @ W @ A)
+        coef = cov_l @ A.T @ W @ centers
+        res = centers - A @ coef
+        dof = len(centers) - 2
+        scale = max(1.0, float(res @ W @ res) / dof) if dof > 0 else 1.0
+        step, err = float(coef[1]), float(np.sqrt(max(cov_l[1, 1], 0.0) * scale))
+        if not (np.isfinite(step) and np.isfinite(err)):
+            return {}
+        return {"step": step, "error": err, "n": n.tolist()}
+    except Exception:
+        return {}
 
 
 @dataclass
@@ -960,28 +1047,14 @@ class ProfileSteps:
     residual_rms: float
 
 
-def profile_steps(s, h, min_step=0.2, edge_exclusion_nm=20.0, smooth_nm=0.0) -> ProfileSteps:
-    """Staircase fit of a (wide, averaged) profile perpendicular to the steps.
-
-    Edges are located where the height changes by more than ``min_step``/2 within
-    ``edge_exclusion_nm``. Then h(s) = a + b·s + Σ_k H_k·Θ(s − e_k) is fitted by
-    least squares to all points farther than ``edge_exclusion_nm``/2 from an edge, so
-    a residual tilt along the profile (b) does not bias the step heights H_k."""
-    s = np.asarray(s, float)
-    h = np.asarray(h, float)
-    ds = s[1] - s[0] if len(s) > 1 else 1.0
-    hs = ndimage.gaussian_filter1d(h, smooth_nm / ds) if smooth_nm > 0 else h
-    half = max(1, int(round(edge_exclusion_nm / 2 / ds)))
-    D = np.full_like(hs, 0.0)
-    D[half:-half] = hs[2 * half:] - hs[:-2 * half]
-    pk, _ = signal.find_peaks(np.abs(D), height=0.5 * min_step, distance=max(1, 2 * half))
-    # an edge needs a usable plateau on both sides (not just the profile end)
-    pk = pk[(s[pk] - s[0] > edge_exclusion_nm) & (s[-1] - s[pk] > edge_exclusion_nm)]
-    edges = s[pk]
+def _staircase_fit(s, h, edges, edge_exclusion_nm, curvature=False, exclude=()):
     used = np.ones_like(s, bool)
+    for a, b in exclude:  # pits / islands crossed by the profile
+        used &= (s < a - edge_exclusion_nm / 2) | (s > b + edge_exclusion_nm / 2)
     for e in edges:
         used &= np.abs(s - e) > edge_exclusion_nm / 2
-    cols = [np.ones_like(s), s - s.mean()] + [(s > e).astype(float) for e in edges]
+    u = s - s.mean()
+    cols = [np.ones_like(s), u] + ([u ** 2 / max(abs(u).max(), 1e-12)] if curvature else [])         + [(s > e).astype(float) for e in edges]
     A = np.stack(cols, axis=1)
     if used.sum() <= A.shape[1]:
         used[:] = True
@@ -991,6 +1064,163 @@ def profile_steps(s, h, min_step=0.2, edge_exclusion_nm=20.0, smooth_nm=0.0) -> 
     s2 = float(res @ res) / dof
     cov = s2 * np.linalg.pinv(A[used].T @ A[used])
     err = np.sqrt(np.clip(np.diag(cov), 0, None))
-    return ProfileSteps(edges=edges, heights=coef[2:], errors=err[2:], slope=float(coef[1]),
+    return coef, err, A, used, res
+
+
+def profile_steps(s, h, min_step=None, edge_exclusion_nm=20.0, smooth_nm=0.0,
+                  reference_step=0.3905, curvature=False, drop_pairs=True) -> ProfileSteps:
+    """Staircase fit of a (wide, averaged) profile perpendicular to the steps.
+
+    Edges are located where the height changes by more than ``min_step``/2 within
+    ``edge_exclusion_nm`` (default ``min_step`` = half the reference step). Then
+    h(s) = a + b·s + Σ_k H_k·Θ(s − e_k) is fitted by least squares to all points
+    farther than ``edge_exclusion_nm``/2 from an edge, so a residual tilt along the
+    profile (b) does not bias the step heights H_k; ``curvature`` adds a quadratic
+    term for a residual bow along the profile. Candidate edges whose fitted height
+    is below ``min_step``/2 (noise, roughness) are dropped and the fit repeated.
+    ``drop_pairs``: two neighbouring edges of opposite sign that return to the same
+    level (|H1 + H2| < min_step/2, closer than 3 × edge_exclusion_nm) are a pit or
+    an island crossed by the profile, not two steps – they are removed as well."""
+    if min_step is None:
+        min_step = 0.5 * reference_step
+    s = np.asarray(s, float)
+    h = np.asarray(h, float)
+    ds = s[1] - s[0] if len(s) > 1 else 1.0
+    hs = ndimage.gaussian_filter1d(h, smooth_nm / ds) if smooth_nm > 0 else h
+    half = max(1, int(round(edge_exclusion_nm / 2 / ds)))
+    D = np.full_like(hs, 0.0)
+    if len(hs) > 2 * half:
+        D[half:-half] = hs[2 * half:] - hs[:-2 * half]
+    pk, _ = signal.find_peaks(np.abs(D), height=0.5 * min_step, distance=max(1, 2 * half))
+    # an edge needs a usable plateau on both sides (not just the profile end); the
+    # profile beyond an edge too close to an end is cut off – left in, the unmodelled
+    # step would tilt the fitted slope b and bias all step heights
+    exclude = []
+    near_lo = pk[s[pk] - s[0] <= edge_exclusion_nm]
+    near_hi = pk[s[-1] - s[pk] <= edge_exclusion_nm]
+    if len(near_lo):
+        exclude.append((s[0] - edge_exclusion_nm, s[near_lo].max()))
+    if len(near_hi):
+        exclude.append((s[near_hi].min(), s[-1] + edge_exclusion_nm))
+    pk = pk[(s[pk] - s[0] > edge_exclusion_nm) & (s[-1] - s[pk] > edge_exclusion_nm)]
+    edges = s[pk]
+    k0 = 3 if curvature else 2
+    while True:
+        coef, err, A, used, res = _staircase_fit(s, h, edges, edge_exclusion_nm, curvature, exclude)
+        H = coef[k0:]
+        drop = np.abs(H) < 0.5 * min_step
+        if drop_pairs and not drop.any():
+            for i in range(len(H) - 1):
+                if (H[i] * H[i + 1] < 0 and abs(H[i] + H[i + 1]) < 0.5 * min_step
+                        and edges[i + 1] - edges[i] < 3 * edge_exclusion_nm):
+                    drop[i] = drop[i + 1] = True
+                    exclude.append((edges[i], edges[i + 1]))
+                    break
+        if not drop.any():
+            break
+        edges = edges[~drop]
+    return ProfileSteps(edges=edges, heights=coef[k0:], errors=err[k0:], slope=float(coef[1]),
                         terraces=np.diff(edges), model=A @ coef, used=used,
                         residual_rms=float(np.sqrt(np.mean(res ** 2))))
+
+
+# --------------------------------------------------------------------------- step direction
+
+
+@dataclass
+class StepDirection:
+    direction: tuple          # unit vector (ux, uy) ⟂ step edges, pointing uphill (x right, y down)
+    angle_deg: float          # atan2(uy, ux)
+    coherence: float          # (λ1 − λ2)/(λ1 + λ2) of the edge structure tensor (1 = straight steps)
+    terrace_nm: float         # mean terrace width = reference step / mean slope (NaN if flat)
+    miscut_deg: float         # atan(mean slope along the direction)
+
+
+def _chord(cx, cy, ux, uy, W, H):
+    """Parameter range t of the line (cx, cy) + t·(ux, uy) inside [0, W] × [0, H]."""
+    lo, hi = -np.inf, np.inf
+    for c, u, L in ((cx, ux, W), (cy, uy, H)):
+        if abs(u) < 1e-12:
+            if not 0 <= c <= L:
+                return 0.0, 0.0
+            continue
+        a, b = (0 - c) / u, (L - c) / u
+        lo, hi = max(lo, min(a, b)), min(hi, max(a, b))
+    return (lo, hi) if hi > lo else (0.0, 0.0)
+
+
+def step_direction(z, dx, dy, smooth_nm=None, edge_sigma=3.0, reference_step=0.3905,
+                   line_filter=7) -> StepDirection:
+    """Direction perpendicular to the step edges and the mean terrace width of a
+    facet-levelled image (terraces horizontal).
+
+    * Direction: structure tensor J = Σ ∇z ∇zᵀ over the step-edge pixels of a
+      smoothed copy. The gradient is high-pass filtered first (a slowly varying
+      slope – bow, waviness – would otherwise dominate) and the image is median
+      filtered over ``line_filter`` lines along the slow axis, which removes
+      residual line offsets (they would show up as edges along x) but keeps step
+      edges, which extend over many lines. The main eigenvector is the step normal,
+      oriented uphill (sign of the mean slope).
+    * Terrace width: with horizontal terraces the mean slope along the normal is
+      step height / terrace width, so T = reference_step / mean slope. This needs no
+      edge detection and is not affected by pits (down + up cancel). Note: the
+      *median* gradient would be the (zero) terrace slope, not the miscut."""
+    z = np.asarray(z, float)
+    ny, nx = z.shape
+    dy = dy or dx
+    sm = smooth_nm or 2.0 * max(dx, dy)
+    z0 = np.nan_to_num(z)
+    if line_filter and line_filter > 1 and ny > 3 * line_filter:
+        z0 = ndimage.median_filter(z0, size=(int(line_filter), 1), mode="nearest")
+    zs = ndimage.gaussian_filter(z0, (sm / dy, sm / dx), mode="nearest")
+    gy0, gx0 = np.gradient(zs, dy, dx)
+    big = max(ny, nx) / 12
+    gx = gx0 - ndimage.gaussian_filter(gx0, big, mode="nearest")
+    gy = gy0 - ndimage.gaussian_filter(gy0, big, mode="nearest")
+    mag = np.hypot(gx, gy)
+    edge = mag > np.median(mag) + edge_sigma * (robust_sigma(mag) or 1e-12)
+    if edge.sum() < 20:
+        edge = mag > np.percentile(mag, 90)
+    jxx, jyy, jxy = (float(np.sum(v[edge])) for v in (gx * gx, gy * gy, gx * gy))
+    lam, vec = np.linalg.eigh(np.array([[jxx, jxy], [jxy, jyy]]))
+    ux, uy = vec[:, 1]
+    mean_slope = float(np.mean(gx0) * ux + np.mean(gy0) * uy)
+    if mean_slope < 0:
+        ux, uy, mean_slope = -ux, -uy, -mean_slope
+    coh = float((lam[1] - lam[0]) / (lam[1] + lam[0])) if lam.sum() > 0 else 0.0
+    terrace = reference_step / mean_slope if mean_slope > 0 and reference_step else np.nan
+    return StepDirection((float(ux), float(uy)), float(np.degrees(np.arctan2(uy, ux))), coh,
+                         float(terrace), float(np.degrees(np.arctan(mean_slope))))
+
+
+@dataclass
+class AutoProfile:
+    p0: tuple                 # (x, y) nm
+    p1: tuple
+    width_px: int             # averaging width along the steps
+    steps: StepDirection
+
+
+def auto_profile(z, dx, dy, fraction=0.8, width_factor=0.4, min_width=3, max_width=None,
+                 sd: StepDirection | None = None) -> AutoProfile:
+    """Profile line through the image centre perpendicular to the steps, covering
+    ``fraction`` of the chord inside the image, and the averaging width
+    clamp(width_factor · terrace width / pixel, min_width, max_width) – wide enough
+    to average out noise, narrow enough that meandering edges are not smeared."""
+    z = np.asarray(z, float)
+    ny, nx = z.shape
+    dy = dy or dx
+    sd = sd or step_direction(z, dx, dy)
+    ux, uy = sd.direction
+    W, H = nx * dx, ny * dy
+    cx, cy = W / 2, H / 2
+    t0, t1 = _chord(cx, cy, ux, uy, W, H)
+    half = 0.5 * fraction * (t1 - t0)
+    p0 = (cx - half * ux, cy - half * uy)
+    p1 = (cx + half * ux, cy + half * uy)
+    max_width = max_width or max(min_width, int(0.1 * min(nx, ny)))
+    if np.isfinite(sd.terrace_nm):
+        w = int(round(width_factor * sd.terrace_nm / min(dx, dy)))
+    else:
+        w = int(round(0.02 * min(nx, ny)))
+    return AutoProfile(p0, p1, int(np.clip(w, min_width, max_width)), sd)
