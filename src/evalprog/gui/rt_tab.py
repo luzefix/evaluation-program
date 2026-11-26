@@ -13,8 +13,14 @@ from PySide6.QtWidgets import (QCheckBox, QHBoxLayout, QLineEdit, QListWidget, Q
 from evalprog.core.rt import analysis as rta
 from evalprog.core.rt.io import load_rt
 
+from evalprog.db.store import Curve, Measurement, Result
+
+from .db_widgets import SaveToDB, file_date
 from .widgets import (PlotWidget, ResultsTable, combo, group, hbox, info_label, open_files,
                       save_file, scroll_panel, show_error, spin)
+
+RESULT_NAMES = {0: ["Tc_onset", "Tc_mid", "Tc_zero", "Tc_onset_tangent", "dTc"],
+                1: ["T_feature1", "T_feature2", "T_feature3", "T_feature4", None]}
 
 MODES = ["Superconducting", "Magnetic / kinks", "Metal–insulator"]
 QUANTITIES = ["R (Ω)", "ρ", "R_sheet (Ω/□)", "R / R(300 K)"]
@@ -93,6 +99,10 @@ class RTTab(QWidget):
         self.btn_save_fig = QPushButton("Save figure (.png)")
         self.btn_save_fig.clicked.connect(self.on_save_fig)
         lay.addWidget(group("Export", [self.btn_save_data, self.btn_save_res, self.btn_save_fig]))
+        self.db = SaveToDB("R(T)", self.db_record, self, name_edit=self.ed_name)
+        self.db.group.setTitle("Database (sample name: see Display)")
+        lay.addWidget(self.db.group)
+        self.analysed = {}     # (dataset, channel) -> {"values": {...}, "mode": str, "branch": str}
 
         right = QSplitter(Qt.Vertical)
         self.plot = PlotWidget(figsize=(9, 7))
@@ -134,6 +144,8 @@ class RTTab(QWidget):
         self.list.blockSignals(False)
         if self.list.currentRow() < 0:
             self.list.setCurrentRow(0)
+        if not self.ed_name.text():
+            self.db.set_source(path)
         if not self.ed_name.text():
             self.ed_name.setText(Path(path).stem)
         self.redraw()
@@ -318,6 +330,8 @@ class RTTab(QWidget):
                     hyst = tm["T_MI warming"] - tm["T_MI cooling"]
                     rows_txt.append(f"hysteresis width = {hyst:.2f} K")
                 self.last = {"markers": markers}
+                names = [f"{q} ({n})" for n in br for q in ("T_MI", "T_Rmin")][:4]
+                names = (names + [None] * 4)[:4] + ["hysteresis"]
                 txt = "<br>".join(rows_txt)
                 vals = (vals + [float("nan")] * 4)[:4]
                 row += vals + [hyst]
@@ -333,6 +347,14 @@ class RTTab(QWidget):
             txt += f"<br>manual marker: {self.marker:.2f} K"
             details += f"; manual {self.marker:.2f} K"
         row += [rrr_v, rho300, details]
+        names = RESULT_NAMES.get(mode) or names
+        vals = {n: v for n, v in zip(names, row[4:9]) if n and np.isfinite(v)}
+        vals[f"RRR ({self.sp_rrr_hi.value():.0f} K)"] = rrr_v
+        vals["rho(300 K)"] = rho300
+        if self.marker is not None:
+            vals["T_manual"] = self.marker
+        self.analysed[(di, ci)] = {"values": vals, "mode": MODES[mode], "branch": self.cb_branch.currentText(),
+                                   "rho_unit": self.cb_unit.currentText()}
         self.lbl_res.setText(txt)
         self.results.append(row)
         self.table.set_rows(self.results)
@@ -373,6 +395,35 @@ class RTTab(QWidget):
             f.write(",".join(["Temperature", self.cb_qty.currentText(), "Temperature", "smoothed", "d/dT", "d2/dT2"]) + "\n")
             f.write(",".join(["K", unit, "K", unit, f"{unit}/K", f"{unit}/K^2"]) + "\n")
             out.to_csv(f, index=False, header=False)
+
+    def db_record(self) -> Measurement:
+        it = self.list.currentItem()
+        if it is None:
+            raise ValueError("Add a file and select a curve first.")
+        di, ci = it.data(Qt.UserRole)
+        d = self.datasets[di]
+        ch = d.channels[ci]
+        a = self.analysed.get((di, ci))
+        res = []
+        if a is not None:
+            for k, v in a["values"].items():
+                unit = a["rho_unit"] if k.startswith("rho") else ("" if k.startswith("RRR") else "K")
+                res.append(Result(k, v, None, unit))
+            res.append(Result("analysis", a["mode"]))
+        g = self.geometry()
+        settings = {"geometry": str(g), "thickness_nm": self.sp_t.value(), "channel": ch.name,
+                    "source": d.source, "branch": a["branch"] if a else None,
+                    "derivative_window_K": self.sp_win.value()}
+        curves = [Curve(f"{ch.kind} ({ch.unit})", d.temperature, ch.values, "T (K)", f"{ch.kind} ({ch.unit})")]
+        if ch.kind == "R" and ch.unit == "Ohm" and g.kind != "none":
+            try:
+                curves.append(Curve(f"rho ({self.cb_unit.currentText()})", d.temperature,
+                                    rta.resistivity(ch.values, g, self.cb_unit.currentText()), "T (K)",
+                                    f"ρ ({self.cb_unit.currentText()})"))
+            except ValueError:
+                pass
+        return Measurement(sample="", technique="R(T)", raw_path=str(d.path), label=ch.name,
+                           measured_at=file_date(d.path), settings=settings, results=res, curves=curves)
 
     def on_save_results(self):
         if not self.results:

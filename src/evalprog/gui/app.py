@@ -5,13 +5,17 @@ from __future__ import annotations
 import os
 import sys
 
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QTimer, QUrl
 from PySide6.QtGui import QAction, QDesktopServices
 from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox, QTabWidget
 
 from evalprog import __version__, materials
 
+from evalprog.db import elab
+
 from .afm_tab import AFMTab
+from .db_tab import DatabaseTab, start_sync
+from .db_widgets import current_db
 from .placeholder import PLANNED, PlaceholderTab
 from .harmonics_tab import HarmonicsTab
 from .rsm_tab import RSMTab
@@ -35,6 +39,8 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.harmonics, "R(H) / Harmonics")
         self.afm = AFMTab()
         self.tabs.addTab(self.afm, "AFM")
+        self.database = DatabaseTab()
+        self.tabs.addTab(self.database, "Database")
         for title, text in PLANNED:
             self.tabs.addTab(PlaceholderTab(title, text), title)
         self.setCentralWidget(self.tabs)
@@ -46,6 +52,24 @@ class MainWindow(QMainWindow):
         else:
             self.resize(1500, 950)
         self.tabs.setCurrentIndex(int(s.value("tab", 0)))
+        # elabFTW: check on start and then every hour whether the daily sync is due
+        self._sync_thread = None
+        self.sync_timer = QTimer(self)
+        self.sync_timer.setInterval(3600 * 1000)
+        self.sync_timer.timeout.connect(self.auto_sync)
+        if not os.environ.get("EVALPROG_SMOKE") and not os.environ.get("EVALPROG_NO_SYNC"):
+            QTimer.singleShot(5000, self.auto_sync)
+            self.sync_timer.start()
+
+    def auto_sync(self):
+        try:
+            cfg = elab.load_config()
+            if not (elab.is_configured(cfg) and cfg.get("auto_sync", True) and elab.due(current_db())):
+                return
+        except Exception:
+            return
+        self.statusBar().showMessage("elabFTW: checking for new entries …")
+        start_sync(self, on_done=lambda msg, ok: self.statusBar().showMessage(msg, 0 if not ok else 30000))
 
     def _menus(self):
         m = self.menuBar().addMenu("&File")

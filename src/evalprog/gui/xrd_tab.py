@@ -18,6 +18,9 @@ from evalprog.core.xrd.film import combine_lattice, make_film_peak, out_of_plane
 from evalprog.core.xrd.peaks import bragg_two_theta, fit_peaks, fit_with_extra_peak, ka2_position
 from evalprog.core.xrd.substrate import EMPYREAN_RADIUS_MM, Correction, find_and_fit, fit_correction
 
+from evalprog.db.store import Curve, Measurement, Result
+
+from .db_widgets import SaveToDB, file_date
 from .widgets import (PlotWidget, ResultsTable, combo, group, hbox, info_label, ispin,
                       open_files, save_file, scroll_panel, show_error, spin)
 
@@ -91,6 +94,8 @@ class XRDTab(QWidget):
         self.btn_save_fig = QPushButton("Save figure (.png)")
         self.btn_save_fig.clicked.connect(self.on_save_fig)
         lay.addWidget(group("Export", [self.btn_save_tab, self.btn_save_xy, self.btn_save_fig]))
+        self.db = SaveToDB("XRD", self.db_record, self)
+        lay.addWidget(self.db.group)
 
         right = QSplitter(Qt.Vertical)
         self.plot = PlotWidget(figsize=(9, 7))
@@ -157,6 +162,7 @@ class XRDTab(QWidget):
         self.lbl_file.setText(f"{Path(path).name}  ({scan.two_theta.size} points, "
                               f"{scan.two_theta.min():.2f}–{scan.two_theta.max():.2f}°, λ = {scan.wavelength:.5f} Å)")
         self.lbl_corr.setText("")
+        self.db.set_source(path)
         self._refresh()
 
     def corrected_x(self):
@@ -386,6 +392,37 @@ class XRDTab(QWidget):
         df = pd.DataFrame(rows)
         df.attrs["correction"] = self.correction.describe()
         return df
+
+    def db_record(self) -> Measurement:
+        if self.scan is None:
+            raise ValueError("Load a scan first.")
+        res = []
+        c = self.correction
+        if self.sub_result is not None:
+            res.append(Result("substrate", self.sub_result.substrate.label))
+        res.append(Result("zero shift Z", c.zero_shift, c.zero_err, "deg"))
+        if c.model == "zero+height":
+            res.append(Result("sample height", c.sample_height_um, None, "um"))
+        for phase in dict.fromkeys(fp["peak"].phase for fp in self.film_peaks):
+            pk = [fp["peak"] for fp in self.film_peaks if fp["peak"].phase == phase]
+            cc, ce = combine_lattice(pk)
+            res.append(Result("c", cc, ce, "Å", phase))
+            if phase in materials.film_names():
+                res.append(Result("eps_zz", out_of_plane_strain(cc, materials.get_film(phase).c) * 100,
+                                  None, "%", phase))
+            for p in pk:
+                lab = f"{phase} {p.hkl_label}"
+                res.append(Result("2theta", p.two_theta, p.two_theta_err, "deg", lab))
+                res.append(Result("FWHM", p.fwhm, None, "deg", lab))
+        if self.sub_result is not None:
+            for sp in self.sub_result.peaks:
+                res.append(Result("FWHM substrate", sp.fit.main.fwhm, None, "deg", sp.label))
+        settings = {"correction": c.describe(), "wavelength": self.scan.wavelength,
+                    "substrate": self.cb_sub.currentText(), "orientation": self.cb_orient.currentText()}
+        return Measurement(sample="", technique="XRD", raw_path=str(self.scan.path) if self.scan.path else None,
+                           measured_at=file_date(self.scan.path), settings=settings, results=res,
+                           curves=[Curve("2theta-omega (corrected)", self.corrected_x(), self.scan.intensity,
+                                         "2θ (°)", "Intensity (counts)")])
 
     def on_save_results(self):
         if self.scan is None:

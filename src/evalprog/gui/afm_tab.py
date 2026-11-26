@@ -12,6 +12,9 @@ from PySide6.QtWidgets import (QCheckBox, QHBoxLayout, QPushButton, QSplitter, Q
 
 from evalprog.core import afm
 
+from evalprog.db.store import Curve, Measurement, Result
+
+from .db_widgets import SaveToDB, file_date
 from .widgets import (PlotWidget, ResultsTable, combo, group, hbox, info_label, ispin,
                       open_files, save_file, scroll_panel, show_error, spin)
 
@@ -150,6 +153,8 @@ class AFMTab(QWidget):
         self.btn_save_fig.clicked.connect(self.on_save_figs)
         lay.addWidget(group("Export", [self.btn_save_z, self.btn_save_prof, self.btn_save_res,
                                        self.btn_save_fig]))
+        self.db = SaveToDB("AFM", self.db_record, self)
+        lay.addWidget(self.db.group)
         self.lbl_log = info_label("")
         lay.addWidget(self.lbl_log)
 
@@ -208,6 +213,7 @@ class AFMTab(QWidget):
         self.profile = None
         self.prof_steps = None
         self.roi = None
+        self.db.set_source(path)
         self.on_channel()
 
     def on_channel(self, *_):
@@ -562,6 +568,23 @@ class AFMTab(QWidget):
                 else:
                     fh.write(f"Distance,Height\nnm,{self.channel.unit}\n")
                     np.savetxt(fh, np.c_[s, h], delimiter=",", fmt="%.6g")
+
+    def db_record(self) -> Measurement:
+        if self.result is None:
+            raise ValueError("Load an image first.")
+        res = []
+        for q, v, e, u, note in self.results:
+            if q.startswith("Profile step ") or q.startswith("Level "):
+                continue      # position-dependent rows: kept in the CSV export only
+            res.append(Result(q, v, e if e != "" else None, u))
+        curves = []
+        if self.profile is not None:
+            curves.append(Curve("profile", self.profile[0], self.profile[1], "distance (nm)",
+                                f"height ({self.channel.unit})"))
+        settings = {"channel": self.channel.label, "corrections": str(self.corrections()),
+                    "width_nm": self.channel.width_nm, "height_nm": self.channel.height_nm}
+        return Measurement(sample="", technique="AFM", raw_path=str(self.file.path), label=self.channel.label,
+                           measured_at=file_date(self.file.path), settings=settings, results=res, curves=curves)
 
     def on_save_results(self):
         if self.result is None:

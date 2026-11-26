@@ -211,3 +211,35 @@ should be added to `tests/data/` as they become available.
 * GenX integration for XRR (run GenX fits / read `.hgx` results)
 * eLabFTW: upload results and figures to experiments via the REST API
 * Python control of the Zurich Instruments lock-ins (zhinst)
+
+## Database
+
+Every analysis tab (XRD, RSM, R(T), AFM) has a **Database** box: the sample name is
+guessed from the file name (element initials + number, e.g. `CIO9`; known sample names
+are preferred) and can be corrected before *Save to database*. Results, the raw-file
+path, the settings and the curves (scan, R(T), profile) are stored in a local SQLite file
+(`~/.evaluation_program/evalprog.sqlite`, changeable in the Database tab).
+Samples have a type (thin film, bulk crystal, lamella, ...); film fields are optional.
+
+The **Database** tab lists one row per measurement with every result and synthesis
+parameter (`syn: ...`) as a column: sort by clicking a header, filter by technique,
+sample type, text or any parameter (`T_Dep > 720`), overlay curves of selected rows
+(normalised, waterfall) and plot any two quantities against each other (e.g. c vs T_Dep).
+
+### elabFTW
+
+Synthesis parameters are read from elabFTW (REST API v2, read-only). Put
+`{"url": "https://elab.example.org", "api_key": "..."}` into
+`~/.evaluation_program/elabftw.json` or `%APPDATA%\evalprog\elabftw.json`
+(or use *Connection ...* in the Database tab). Experiments of the category
+*Thin Film Growth* are matched to samples by their title (`CIO38_STO(001)`); the
+parameter table of the template (precursors and masses, deposition volume, T_Dep,
+T_Shutter, air flow, ...) is parsed into parameters. The program checks once a day
+(at start and hourly while open). For a scheduled sync without the GUI:
+
+```
+python -m evalprog.db.elab --if-due
+schtasks /Create /SC DAILY /ST 07:00 /TN evalprog-elab /TR "pythonw -m evalprog.db.elab --if-due"
+```
+
+`pip install elabapi-python` uses the official client; without it plain HTTPS requests are made.

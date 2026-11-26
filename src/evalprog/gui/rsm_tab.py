@@ -17,6 +17,9 @@ from evalprog import materials
 from evalprog.core.rsm import analysis as ra
 from evalprog.core.xrd import io as xio
 
+from evalprog.db.store import Measurement, Result
+
+from .db_widgets import SaveToDB, file_date
 from .widgets import (PlotWidget, ResultsTable, combo, group, hbox, info_label, ispin,
                       open_files, save_file, scroll_panel, show_error, spin)
 
@@ -96,6 +99,8 @@ class RSMTab(QWidget):
         self.btn_save = QPushButton("Save results (.csv) and figure")
         self.btn_save.clicked.connect(self.on_save)
         lay.addWidget(self.btn_save)
+        self.db = SaveToDB("RSM", self.db_record, self)
+        lay.addWidget(self.db.group)
 
         right = QSplitter(Qt.Vertical)
         self.plot = PlotWidget(figsize=(9, 8))
@@ -154,6 +159,7 @@ class RSMTab(QWidget):
         self.lbl_file.setText(f"{self.path.name}: {area.intensity.shape[0]} × {area.intensity.shape[1]} points, "
                               f"λ = {area.wavelength:.5f} Å")
         self.lbl_offset.setText("")
+        self.db.set_source(path)
         self.redraw(keep_view=False)
 
     # ------------------------------------------------------------- drawing
@@ -380,6 +386,32 @@ class RSMTab(QWidget):
                          "r2": pk.r2, "rel_rmse": pk.rel_rmse, "chi2_red": pk.chi2_red,
                          "weighting": pk.weighting})
         return pd.DataFrame(rows)
+
+    def db_record(self) -> Measurement:
+        if self.rsm is None:
+            raise ValueError("Load an RSM first.")
+        if not self.peaks:
+            raise ValueError("Fit at least one film peak first.")
+        res = []
+        if self.offset is not None:
+            res += [Result("delta 2theta", self.offset.d_two_theta, None, "deg"),
+                    Result("delta omega", self.offset.d_omega, None, "deg")]
+        for p in self.peaks:
+            pk, st = p["peak"], p["strain"]
+            lab = f"{p['phase']} {p['hkl_label']}"
+            res += [Result("Qx", pk.qx, pk.qx_err, "1/Å", lab), Result("Qz", pk.qz, pk.qz_err, "1/Å", lab),
+                    Result("a_ip", st.a_inplane, st.a_inplane_err, "Å", lab),
+                    Result("c", st.c_out, st.c_out_err, "Å", lab),
+                    Result("eps_xx", st.eps_xx * 100, None, "%", lab),
+                    Result("eps_zz", st.eps_zz * 100, None, "%", lab),
+                    Result("relaxation", st.relaxation * 100, None, "%", lab),
+                    Result("relaxation (Poisson)", st.relaxation_poisson * 100, None, "%", lab),
+                    Result("a_relaxed", st.a_relaxed, None, "Å", lab),
+                    Result("R2", pk.r2, None, "", lab)]
+        settings = {"substrate": self.substrate().label, "direction": self.direction(),
+                    "hkl_substrate": str(self._hkl_sub()), "weighting": self.cb_weight.currentText()}
+        return Measurement(sample="", technique="RSM", raw_path=str(self.path), measured_at=file_date(self.path),
+                           settings=settings, results=res)
 
     def on_save(self):
         if self.rsm is None:

@@ -18,6 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "pyinstaller>=6"]
+elab = ["elabapi-python>=5"]
 
 [project.scripts]
 evalprog = "evalprog.__main__:main"

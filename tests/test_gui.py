@@ -15,7 +15,9 @@ from synth import (afm_terraces, rsm_grid, write_nanoscope, write_lockin_rt, wri
 
 
 @pytest.fixture(scope="module")
-def window():
+def window(tmp_path_factory):
+    os.environ["EVALPROG_DB"] = str(tmp_path_factory.mktemp("db") / "test.sqlite")
+    os.environ["EVALPROG_NO_SYNC"] = "1"
     from evalprog.gui import app as app_mod, rsm_tab, rt_tab, xrd_tab
     MainWindow = app_mod.MainWindow
 
@@ -23,7 +25,8 @@ def window():
         raise AssertionError(f"{title}: {exc}")
 
     from evalprog.gui import afm_tab, harmonics_tab
-    for mod in (rsm_tab, rt_tab, xrd_tab, harmonics_tab, afm_tab):
+    from evalprog.gui import db_widgets
+    for mod in (rsm_tab, rt_tab, xrd_tab, harmonics_tab, afm_tab, db_widgets):
         mod.show_error = raiser
     app = QApplication.instance() or QApplication([])
     w = MainWindow()
@@ -148,3 +151,57 @@ def test_afm_tab(window, tmp_path):
     assert tab.profile is not None and tab.auto is not None
     assert tab.sp_width.value() == tab.auto.width_px
     assert abs(tab.auto.steps.direction[0]) > 0.9   # synthetic steps run along y
+
+
+def test_database(window, tmp_path):
+    from evalprog.gui.db_widgets import current_db
+    x, y = xrd_scan(get_substrate("SrTiO3", "(001)"))
+    p = tmp_path / "CIO9_xrd.xy"
+    write_xy(p, x, y)
+    tab = window.xrd
+    tab.load(str(p))
+    assert tab.db.sample() == "CIO9"
+    tab.on_fit_substrate()
+    tab._on_span(45.0, 47.0)
+    tab.sp_l.setValue(2)
+    tab.on_fit_film()
+    tab.db.on_save()
+    tab.db.on_save()                       # overwrite, not duplicate
+    rt = window.rt
+    rt.on_clear()
+    rt.ed_name.setText("")
+    q = tmp_path / "CIO9_eto.dat"
+    write_qd_sc(q)
+    rt.add_file(str(q))
+    assert rt.ed_name.text() == "CIO9"
+    rt.cb_mode.setCurrentIndex(0)
+    rt.on_analyse()
+    rt.db.on_save()
+    db = current_db()
+    t = db.table()
+    assert sorted(t["technique"]) == ["R(T)", "XRD"]
+    assert t["Tc_mid"].dropna().item() == pytest.approx(30.0, abs=0.5)
+    dbt = window.database
+    dbt.reload()
+    assert dbt.model.rowCount() == 2
+    dbt.cb_tech.setCurrentText("XRD")
+    assert dbt.model.rowCount() == 1
+    dbt.cb_tech.setCurrentText("all")
+    dbt.add_filter()
+    f = dbt.filters[-1]
+    f.cb_col.setCurrentText("Tc_mid")
+    f.cb_op.setCurrentText(">")
+    f.ed_val.setText("20")
+    dbt.refilter()
+    assert dbt.model.rowCount() == 1
+    dbt.remove_filter(f)
+    dbt.view.selectAll()
+    dbt._update_curve_names()
+    dbt.cb_curve.setCurrentIndex(0)
+    dbt.on_overlay()
+    db.set_params("CIO9", {"T_Dep": 720})
+    dbt.reload()
+    dbt.cb_x.setCurrentText("syn: T_Dep")
+    dbt.cb_y.setCurrentText("Tc_mid")
+    dbt.on_scatter()
+    dbt.plot.figure.savefig(tmp_path / "db.png")
