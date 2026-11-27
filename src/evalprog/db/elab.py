@@ -29,6 +29,7 @@ import os
 import re
 import ssl
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
@@ -147,6 +148,128 @@ class Client:
             if len(batch) < page:
                 return
             offset += page
+
+    # ------------------------------------------------------------- writing
+    def _request(self, method: str, path: str, data: bytes | None = None, content_type: str | None = None):
+        """Write request (POST/PATCH) with plain urllib; returns (status, headers, body)."""
+        url = f"{self.base}/{path}"
+        headers = {"Authorization": self.cfg["api_key"], "Accept": "application/json"}
+        if content_type:
+            headers["Content-Type"] = content_type
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        ctx = None
+        if url.startswith("https") and not self.cfg.get("verify_ssl", True):
+            ctx = ssl._create_unverified_context()
+        try:
+            with urllib.request.urlopen(req, timeout=120, context=ctx) as r:
+                return r.status, dict(r.headers), r.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as e:
+            msg = e.read().decode("utf-8", "replace")[:300]
+            if e.code in (401, 403):
+                raise PermissionError(f"elabFTW refused the change ({e.code}). Either the API key is "
+                                      f"read-only (create a 'Read/Write' key in elabFTW) or you may not edit "
+                                      f"this entry (e.g. it belongs to someone else). {msg}") from None
+            raise RuntimeError(f"elabFTW error {e.code}: {msg}") from None
+
+    def upload(self, kind: str, eid: int, path, comment: str = "") -> dict:
+        """Attach a file to an entry; returns the upload record (id, long_name, storage, ...)."""
+        p = Path(path)
+        boundary = "----evalprog" + os.urandom(8).hex()
+        parts = []
+        for name, value in (("comment", comment),):
+            parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+                         .encode("utf-8"))
+        ctype = "image/png" if p.suffix.lower() == ".png" else "application/octet-stream"
+        parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{p.name}\"\r\n"
+                     f"Content-Type: {ctype}\r\n\r\n".encode("utf-8") + p.read_bytes() + b"\r\n")
+        parts.append(f"--{boundary}--\r\n".encode("utf-8"))
+        _, headers, _ = self._request("POST", f"{kind}/{int(eid)}/uploads", b"".join(parts),
+                                      f"multipart/form-data; boundary={boundary}")
+        loc = headers.get("Location") or headers.get("location") or ""
+        uid = loc.rstrip("/").rsplit("/", 1)[-1]
+        if uid.isdigit():
+            return self._get(f"{kind}/{int(eid)}/uploads/{uid}")
+        # older instances: take the newest upload with this name
+        ups = [u for u in self._get(f"{kind}/{int(eid)}/uploads") if u.get("real_name") == p.name]
+        if not ups:
+            raise RuntimeError("Upload done, but the file could not be found in the entry.")
+        return max(ups, key=lambda u: u.get("id", 0))
+
+    def create_experiment(self, title: str, template=None, category=None, status=None, date=None,
+                          tags=()) -> int:
+        """Create a new experiment (optionally from a template) and set its fields; returns its id."""
+        payload = {"template": int(template)} if template else {}
+        _, headers, _ = self._request("POST", "experiments", json.dumps(payload).encode("utf-8"),
+                                      "application/json")
+        loc = headers.get("Location") or headers.get("location") or ""
+        eid = loc.rstrip("/").rsplit("/", 1)[-1]
+        if not eid.isdigit():
+            raise RuntimeError("elabFTW did not return the id of the new entry.")
+        eid = int(eid)
+        fields = {"title": title}
+        if category:
+            fields["category"] = int(category)
+        if status:
+            fields["status"] = int(status)
+        if date:
+            fields["date"] = str(date)
+        self._request("PATCH", f"experiments/{eid}", json.dumps(fields).encode("utf-8"), "application/json")
+        for t in tags or ():
+            self._request("POST", f"experiments/{eid}/tags", json.dumps({"tag": t}).encode("utf-8"),
+                          "application/json")
+        return eid
+
+    def append_body(self, kind: str, eid: int, html_fragment: str):
+        """Append HTML to the main text of an entry (the old text is kept)."""
+        body = self._get(f"{kind}/{int(eid)}").get("body") or ""
+        data = json.dumps({"body": body + "\n" + html_fragment}).encode("utf-8")
+        self._request("PATCH", f"{kind}/{int(eid)}", data, "application/json")
+
+
+def download_url(upload: dict) -> str:
+    """Relative link to an uploaded file, as elabFTW uses it in the main text."""
+    q = urllib.parse.urlencode({"name": upload.get("real_name", ""), "f": upload.get("long_name", ""),
+                                "storage": upload.get("storage", 1)})
+    return f"app/download.php?{q}"
+
+
+def results_html(title: str, rows, comment: str = "", image_url: str | None = None, source: str = "") -> str:
+    """HTML block for the lab book: heading, optional comment, figure and results table.
+    ``rows``: iterable of (quantity, value, error, unit)."""
+    esc = html.escape
+    out = [f"<h3>{esc(title)}</h3>"]
+    if comment:
+        out.append(f"<p>{esc(comment)}</p>")
+    if image_url:
+        out.append(f'<p><img src="{esc(image_url)}" alt="{esc(title)}" width="700" /></p>')
+    rows = list(rows)
+    if rows:
+        out.append("<table><tbody><tr><td><strong>Quantity</strong></td><td><strong>Value</strong></td>"
+                   "<td><strong>Unit</strong></td></tr>")
+        for q, v, e, u in rows:
+            if isinstance(v, float):
+                val = f"{v:.5g}" + (f" ± {e:.2g}" if isinstance(e, float) and e == e else "")
+            else:
+                val = str(v)
+            out.append(f"<tr><td>{esc(str(q))}</td><td>{esc(val)}</td><td>{esc(u or '')}</td></tr>")
+        out.append("</tbody></table>")
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    out.append(f"<p><em>Added by Evaluation Program, {stamp}" + (f", data: {esc(source)}" if source else "")
+               + "</em></p>")
+    return "\n".join(out)
+
+
+def append_result(cfg: dict, kind: str, eid: int, title: str, rows, figure_path=None, comment: str = "",
+                  source: str = "", client: Client | None = None) -> str:
+    """Upload the figure (if any) and append a results block to the entry. Returns the entry link."""
+    client = client or Client(cfg)
+    url = None
+    if figure_path:
+        up = client.upload(kind, eid, figure_path, comment=title)
+        url = download_url(up)
+    client.append_body(kind, eid, results_html(title, rows, comment, url, source))
+    page = "experiments" if kind == "experiments" else "database"
+    return f"{cfg['url']}/{page}.php?mode=view&id={int(eid)}"
 
 
 # ------------------------------------------------------------ HTML tables

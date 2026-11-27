@@ -90,7 +90,7 @@ class HarmonicsTab(QWidget):
         lay.addWidget(self.btn_run)
         lay.addWidget(self.progress)
         lay.addWidget(b_out)
-        self.db = SaveToDB("R(H)", self.db_record, self)
+        self.db = SaveToDB("R(H)", self.db_record, self, figure=self._current_figure)
         self.db.btn.setText("Save all evaluated curves to database")
         lay.addWidget(self.db.group)
 
@@ -326,6 +326,14 @@ class HarmonicsTab(QWidget):
             self.db.set_source(paths[0])
 
     # ================================================================ database
+    def _current_figure(self):
+        """Figure of the visible sub-tab (Preview, R(T), Heating, Hall, Comparison)."""
+        w = self.tabs.currentWidget()
+        plots = [w] if isinstance(w, PlotWidget) else w.findChildren(PlotWidget)
+        if not plots:
+            raise ValueError("No plot visible.")
+        return plots[0].figure
+
     def db_record(self) -> list:
         """One database entry per evaluated field sweep (sym/antisym of every signal,
         Hall numbers if fitted) and per R(T) curve."""

@@ -411,6 +411,28 @@ class RSMTab(QWidget):
                     Result("relaxation (Poisson)", st.relaxation_poisson * 100, None, "%", lab),
                     Result("a_relaxed", st.a_relaxed, None, "Å", lab),
                     Result("R2", pk.r2, None, "", lab)]
+        # several reflections of one phase: weighted means as the main values (label = phase)
+        for phase in dict.fromkeys(p["phase"] for p in self.peaks):
+            sts = [p["strain"] for p in self.peaks if p["phase"] == phase]
+            if len(sts) < 2:
+                continue
+            for key, attr, err, scale, unit in (("a_ip", "a_inplane", "a_inplane_err", 1, "Å"),
+                                                 ("c", "c_out", "c_out_err", 1, "Å"),
+                                                 ("eps_xx", "eps_xx", None, 100, "%"),
+                                                 ("eps_zz", "eps_zz", None, 100, "%"),
+                                                 ("relaxation", "relaxation", None, 100, "%")):
+                v = np.array([getattr(s, attr) for s in sts], float) * scale
+                ok = np.isfinite(v)
+                if not ok.any():
+                    continue
+                e = np.array([getattr(s, err) for s in sts], float) if err else np.full(v.size, np.nan)
+                if err and np.all(np.isfinite(e[ok]) & (e[ok] > 0)):
+                    w = 1 / e[ok] ** 2
+                    mean, sig = float(np.sum(w * v[ok]) / w.sum()), float(1 / np.sqrt(w.sum()))
+                else:
+                    mean = float(v[ok].mean())
+                    sig = float(v[ok].std(ddof=1) / np.sqrt(ok.sum())) if ok.sum() > 1 else None
+                res.append(Result(key, mean, sig, unit, phase))
         settings = {"substrate": self.substrate().label, "direction": self.direction(),
                     "hkl_substrate": str(self._hkl_sub()), "weighting": self.cb_weight.currentText()}
         return Measurement(sample="", technique="RSM", raw_path=str(self.path), measured_at=file_date(self.path),

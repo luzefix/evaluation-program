@@ -28,6 +28,8 @@ import pandas as pd
 
 from evalprog.materials import USER_DIR
 
+from . import columns as cols
+
 DEFAULT_PATH = USER_DIR / "evalprog.sqlite"
 
 SAMPLE_TYPES = ["thin film", "bulk crystal", "lamella", "powder", "other"]
@@ -326,8 +328,9 @@ class Database:
         with self.con:
             for role, path in files:
                 if path:
+                    p = str(path) if str(path).startswith(("http://", "https://")) else str(Path(path))
                     self.con.execute("INSERT OR REPLACE INTO files VALUES (?, ?, ?, ?)",
-                                     (int(mid), str(Path(path)), role, _now()))
+                                     (int(mid), p, role, _now()))
 
     def files(self, mid: int) -> list[tuple[str, str]]:
         return [(r[0], r[1]) for r in self.con.execute(
@@ -373,28 +376,56 @@ class Database:
 
     # ------------------------------------------------------------ flat view
     def table(self, with_params: bool = True) -> pd.DataFrame:
-        """One row per measurement: base columns, then every result key (as
-        ``key`` or ``key [label]``), then sample parameters (prefixed ``syn:``)."""
+        """One row per measurement: base columns, then the main results
+        (``'<technique> <key> (unit)'``, e.g. ``XRD c mean (Å)``), the detail results
+        (``'<technique> <key> [<label>] (unit)'``) and the sample parameters (``syn: ...``).
+
+        ``df.attrs`` holds the column groups: ``main``, ``detail``, ``syn_key``, ``syn``.
+        """
         base = pd.read_sql_query(
             "SELECT m.id, s.name AS sample, s.sample_type, m.technique, m.label, m.measured_at, m.saved_at, "
             "s.material, s.substrate, s.orientation, s.thickness_nm, m.raw_path, m.sample_id "
             "FROM measurements m JOIN samples s ON s.id = m.sample_id ORDER BY m.saved_at", self.con)
-        res = pd.read_sql_query("SELECT measurement_id, key, label, value, text FROM results", self.con)
+        res = pd.read_sql_query("SELECT r.measurement_id, m.technique, r.key, r.label, r.value, r.text, r.unit "
+                                "FROM results r JOIN measurements m ON m.id = r.measurement_id", self.con)
+        main_cols, detail_cols = [], []
         if len(res):
-            res["col"] = [result_column(k, lab) for k, lab in zip(res["key"], res["label"])]
-            res.loc[res["col"].isin(BASE_COLUMNS + ["sample_id"]), "col"] = "result: " + res["col"]
+            res["unit"] = res["unit"].fillna("")
+            res["label"] = res["label"].fillna("")
+            res["rank"] = [cols.main_rank(t, k, lab) for t, k, lab in zip(res["technique"], res["key"], res["label"])]
+            res["main"] = res["rank"].notna()
+            # single reflections ('phase (h k l)') are details when the measurement also has the
+            # value averaged over the reflections ('phase')
+            has_mean = set(zip(res["measurement_id"], res["key"], res["label"]))
+            per_peak = [m and "(" in lab and (mid, k, lab.split(" (")[0]) in has_mean
+                        for m, lab, mid, k in zip(res["main"], res["label"], res["measurement_id"], res["key"])]
+            res.loc[per_peak, "main"] = False
+            res.loc[per_peak, "rank"] = None
+            # the phase / reflection label of main values is only kept if a measurement has several
+            nlab = res[res["main"] & (res["label"] != "")].groupby("measurement_id")["label"].nunique()
+            res["col"] = [cols.column_name(t, k, lab, u, m, nlab.get(mid, 0) > 1)
+                          for t, k, lab, u, m, mid in zip(res["technique"], res["key"], res["label"],
+                                                          res["unit"], res["main"], res["measurement_id"])]
             res["v"] = res["value"].astype(object).where(res["value"].notna(), res["text"])
             wide = res.pivot_table(index="measurement_id", columns="col", values="v", aggfunc="first")
-            wide = wide[sorted(wide.columns, key=str.lower)]
-            base = base.merge(wide, left_on="id", right_index=True, how="left")
+            order = res.drop_duplicates("col").copy()
+            order["t"] = [cols.TECH_ORDER.index(t) if t in cols.TECH_ORDER else 99 for t in order["technique"]]
+            m = order[order["main"]].sort_values(["t", "rank", "col"])
+            main_cols = list(m["col"])
+            detail_cols = sorted(order.loc[~order["main"], "col"], key=str.lower)
+            base = base.merge(wide[main_cols + detail_cols], left_on="id", right_index=True, how="left")
+        syn_key, syn = [], []
         if with_params:
-            par = pd.read_sql_query("SELECT sample_id, key, value, num FROM sample_params", self.con)
+            par = pd.read_sql_query("SELECT sample_id, key, value, num, unit FROM sample_params", self.con)
             if len(par):
                 par["v"] = par["num"].astype(object).where(par["num"].notna(), par["value"])
-                par["key"] = "syn: " + par["key"]
-                wide = par.pivot_table(index="sample_id", columns="key", values="v", aggfunc="first")
-                wide = wide[sorted(wide.columns, key=str.lower)]
-                base = base.merge(wide, left_on="sample_id", right_index=True, how="left")
+                units = par[par["unit"].fillna("") != ""].groupby("key")["unit"].agg(lambda s: s.mode().iloc[0])
+                par["col"] = [cols.syn_column(k, units.get(k, "")) for k in par["key"]]
+                wide = par.pivot_table(index="sample_id", columns="col", values="v", aggfunc="first")
+                syn_key = [cols.syn_column(k, units.get(k, "")) for k in cols.KEY_SYNTHESIS]
+                syn_key = [c for c in syn_key if c in wide.columns]
+                syn = sorted([c for c in wide.columns if c not in syn_key], key=str.lower)
+                base = base.merge(wide[syn_key + syn], left_on="sample_id", right_index=True, how="left")
         nf = pd.read_sql_query("SELECT measurement_id, COUNT(*) AS n FROM files GROUP BY measurement_id", self.con)
         base.insert(len(BASE_COLUMNS) - 1, "files", base["id"].map(dict(zip(nf["measurement_id"], nf["n"])))
                     .fillna(0).astype(int))
@@ -403,6 +434,7 @@ class Database:
             conv = pd.to_numeric(base[c], errors="coerce")
             if conv.notna().sum() == base[c].notna().sum():
                 base[c] = conv
+        base.attrs.update(main=main_cols, detail=detail_cols, syn_key=syn_key, syn=syn)
         return base
 
 

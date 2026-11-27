@@ -112,8 +112,8 @@ SAMPLE_BASE = ["sample", "sample_type", "material", "substrate", "orientation", 
 
 
 def per_sample(df: pd.DataFrame) -> pd.DataFrame:
-    """One row per sample. Results become '<technique>: <key>' (latest saved value of
-    that technique), synthesis parameters are taken once. Column 'ids' lists the
+    """One row per sample. Result columns (already '<technique> <key> (unit)') take the
+    latest saved value, synthesis parameters are taken once. Column 'ids' lists the
     measurements that went into the row."""
     if df.empty:
         return pd.DataFrame(columns=SAMPLE_BASE + ["ids"])
@@ -127,25 +127,72 @@ def per_sample(df: pd.DataFrame) -> pd.DataFrame:
                "substrate": first["substrate"], "orientation": first["orientation"],
                "thickness_nm": first["thickness_nm"], "measurements": len(g),
                "techniques": ", ".join(sorted(g["technique"].unique())), "ids": list(g["id"])}
-        for tech, gt in g.groupby("technique", sort=True):
-            for c in res_cols:
-                s = gt[c].dropna()
-                if len(s):
-                    row[f"{tech}: {c}"] = s.iloc[-1]
-        for c in syn_cols:
+        for c in res_cols + syn_cols:
             s = g[c].dropna()
             if len(s):
-                row[c] = s.iloc[0]
+                row[c] = s.iloc[-1]
         rows.append(row)
     out = pd.DataFrame(rows)
-    rest = sorted([c for c in out.columns if c not in SAMPLE_BASE + ["ids"] and not c.startswith("syn: ")],
-                  key=str.lower)
-    out = out[SAMPLE_BASE + ["ids"] + rest + [c for c in syn_cols if c in out.columns]]
-    for c in rest:
-        conv = pd.to_numeric(out[c], errors="coerce")
-        if conv.notna().sum() == out[c].notna().sum():
-            out[c] = conv
+    out = out[SAMPLE_BASE + ["ids"] + [c for c in res_cols + syn_cols if c in out.columns]]
+    for c in res_cols:
+        if c in out.columns:
+            conv = pd.to_numeric(out[c], errors="coerce")
+            if conv.notna().sum() == out[c].notna().sum():
+                out[c] = conv
     return out
+
+
+def default_columns(df: pd.DataFrame, attrs: dict, sample_view: bool, details: bool, all_syn: bool) -> list:
+    """Visible columns in display order: sample info, key synthesis parameters, main
+    results, then (on request) details, remaining synthesis parameters and file info."""
+    head = (["sample", "material", "substrate", "orientation", "thickness_nm", "techniques", "measurements"]
+            if sample_view else ["sample", "technique", "material", "substrate", "orientation", "thickness_nm"])
+    cols_ = head + attrs.get("syn_key", []) + attrs.get("main", [])
+    if details:
+        cols_ += attrs.get("detail", [])
+    if all_syn or details:
+        cols_ += attrs.get("syn", [])
+    if details:
+        cols_ += ["sample_type"] if sample_view else ["sample_type", "label", "measured_at", "saved_at",
+                                                      "raw_path", "files"]
+    return [c for c in dict.fromkeys(cols_) if c in df.columns]
+
+
+class ColumnsDialog(QDialog):
+    """Choose and order the visible columns (drag to reorder)."""
+
+    def __init__(self, all_cols, visible, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Columns")
+        self.resize(420, 620)
+        self.lw = QListWidget()
+        self.lw.setDragDropMode(QAbstractItemView.InternalMove)
+        for c in list(visible) + [c for c in all_cols if c not in visible]:
+            it = QListWidgetItem(c)
+            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+            it.setCheckState(Qt.Checked if c in visible else Qt.Unchecked)
+            self.lw.addItem(it)
+        self.reset = False
+        b_reset = QPushButton("Reset to default")
+        b_reset.clicked.connect(self._reset)
+        b_none = QPushButton("Untick all")
+        b_none.clicked.connect(lambda: [self.lw.item(i).setCheckState(Qt.Unchecked) for i in range(self.lw.count())])
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        v = QVBoxLayout(self)
+        v.addWidget(QLabel("Tick the columns to show; drag to change the order."))
+        v.addWidget(self.lw)
+        v.addWidget(hbox(b_none, b_reset))
+        v.addWidget(bb)
+
+    def _reset(self):
+        self.reset = True
+        self.accept()
+
+    def columns(self):
+        return [self.lw.item(i).text() for i in range(self.lw.count())
+                if self.lw.item(i).checkState() == Qt.Checked]
 
 
 class FilterRow(QWidget):
@@ -397,13 +444,18 @@ class DatabaseTab(QWidget):
         self.ed_search.setPlaceholderText("sample / material / file, e.g. CIO9, CIO12")
         self.chk_empty = QCheckBox("hide empty columns")
         self.chk_empty.setChecked(True)
-        self.chk_syn = QCheckBox("show synthesis parameters (syn: …)")
-        self.chk_syn.setChecked(True)
+        self.chk_syn = QCheckBox("all synthesis parameters")
+        self.chk_syn.setToolTip("The key ones (T_Dep, T_Shutter, Dep volume, ...) are always shown")
+        self.chk_details = QCheckBox("details (single peaks, fit quality, files, dates)")
+        self.b_cols = QPushButton("Columns …")
+        self.b_cols.setToolTip("Choose and order the visible columns (saved)")
+        self.b_cols.clicked.connect(self.on_columns)
         for w in (self.cb_tech, self.cb_stype):
             w.currentIndexChanged.connect(self.refilter)
         self.ed_search.textChanged.connect(self.refilter)
         self.chk_empty.toggled.connect(self.refilter)
         self.chk_syn.toggled.connect(self.refilter)
+        self.chk_details.toggled.connect(self.refilter)
         self.filter_box = QVBoxLayout()
         self.filter_box.setSpacing(2)
         fw = QWidget()
@@ -411,7 +463,8 @@ class DatabaseTab(QWidget):
         b_add = QPushButton("+ parameter filter")
         b_add.clicked.connect(self.add_filter)
         lay.addWidget(group("Filter", [("View", self.cb_view), ("Technique", self.cb_tech), ("Sample type", self.cb_stype),
-                                       ("Search", self.ed_search), fw, b_add, self.chk_empty, self.chk_syn]))
+                                       ("Search", self.ed_search), fw, b_add]))
+        lay.addWidget(group("Show", [self.chk_details, self.chk_syn, self.chk_empty, self.b_cols]))
 
         self.cb_curve = combo([])
         self.cb_norm = combo(NORMALISE)
@@ -514,7 +567,7 @@ class DatabaseTab(QWidget):
         num = [c for c in df.columns if c not in ("id", "files", "measurements", "ids")
                and pd.api.types.is_numeric_dtype(df[c])]
         dates = [] if self.per_sample_mode() else ["measured_at", "saved_at"]
-        for cb, default in ((self.cb_x, "syn: T_Dep"), (self.cb_y, "c")):
+        for cb, default in ((self.cb_x, "syn: T_Dep (°C)"), (self.cb_y, "XRD c mean (Å)")):
             cur = cb.currentText() or default
             cb.blockSignals(True)
             cb.clear()
@@ -542,27 +595,54 @@ class DatabaseTab(QWidget):
             df = f.apply(df)
         return df
 
+    def _cols_key(self):
+        return "db_columns_sample" if self.per_sample_mode() else "db_columns_measurement"
+
+    def visible_columns(self, df) -> list:
+        saved = settings().value(self._cols_key(), None)
+        if saved:
+            saved = [saved] if isinstance(saved, str) else list(saved)
+            return [c for c in saved if c in df.columns]
+        return default_columns(df, self.full.attrs, self.per_sample_mode(), self.chk_details.isChecked(),
+                               self.chk_syn.isChecked())
+
+    def on_columns(self):
+        df = self._frame()
+        all_cols = [c for c in df.columns if c not in ("id", "ids")]
+        dlg = ColumnsDialog(all_cols, self.visible_columns(df), self)
+        if dlg.exec():
+            if dlg.reset:
+                settings().remove(self._cols_key())
+            else:
+                settings().setValue(self._cols_key(), dlg.columns())
+            self.refilter()
+
+    def _frame(self):
+        df = self.filtered()
+        return per_sample(df) if self.per_sample_mode() else df
+
     def refilter(self, *_):
         df = self.filtered()
         nmeas = len(df)
-        base = BASE_COLUMNS
+        key = "ids" if self.per_sample_mode() else "id"
         if self.per_sample_mode():
             df = per_sample(df)
-            base = SAMPLE_BASE + ["ids"]
-        if not self.chk_syn.isChecked():
-            df = df[[c for c in df.columns if not str(c).startswith("syn: ")]]
+        show = self.visible_columns(df)
+        custom = bool(settings().value(self._cols_key(), None))
+        self.b_cols.setText("Columns … (custom)" if custom else "Columns …")
         if self.chk_empty.isChecked() and len(df):
-            keep = [c for c in df.columns if c in base or df[c].notna().any()]
-            df = df[keep]
+            fixed = {"sample", "technique", "material", "substrate", "orientation"}
+            show = [c for c in show if c in fixed or df[c].notna().any()]
+        df = df[show + [key]] if key in df.columns else df[show]
         self.model.set_frame(df)
         self.view.resizeColumnsToContents()
         for i in range(self.model.columnCount()):
-            if self.view.columnWidth(i) > 260:
-                self.view.setColumnWidth(i, 260)
+            if self.view.columnWidth(i) > 220:
+                self.view.setColumnWidth(i, 220)
             self.view.setColumnHidden(i, str(df.columns[i]) in ("id", "ids"))
         if self.per_sample_mode():
             self.lbl_count.setText(f"{len(df)} samples ({nmeas} of {len(self.full)} measurements) — "
-                                   f"columns '<technique>: <quantity>' show the latest saved value")
+                                   f"result columns show the latest saved value")
         else:
             self.lbl_count.setText(f"{len(df)} of {len(self.full)} measurements — click a header to sort, "
                                    f"double-click a row to edit the sample")
@@ -590,10 +670,12 @@ class DatabaseTab(QWidget):
     def selected(self) -> pd.DataFrame:
         """Selected measurements (in sample view: all filtered measurements of the selected samples)."""
         sel = self.selected_rows()
-        if not self.per_sample_mode():
-            return sel
-        ids = [i for lst in sel.get("ids", []) for i in lst]
-        return self.full[self.full["id"].isin(ids)]
+        if self.per_sample_mode():
+            ids = [i for lst in sel.get("ids", []) for i in lst]
+        else:
+            ids = list(sel["id"]) if "id" in sel else []
+        full = self.full.set_index("id", drop=False)
+        return full.loc[[i for i in ids if i in full.index]].reset_index(drop=True)
 
     def _update_curve_names(self, *_):
         sel = self.selected()
@@ -747,7 +829,7 @@ class DatabaseTab(QWidget):
         lw = QListWidget()
         raw = r.get("raw_path")
         for role, path in ([("raw data", raw)] if raw else []) + files:
-            ok = Path(path).exists()
+            ok = path.startswith(("http://", "https://")) or Path(path).exists()
             it = QListWidgetItem(f"{role}:   {path}" + ("" if ok else "   (not found)"))
             it.setData(Qt.UserRole, path)
             lw.addItem(it)
@@ -755,6 +837,9 @@ class DatabaseTab(QWidget):
         def open_(folder=False):
             it = lw.currentItem()
             if it is None:
+                return
+            if str(it.data(Qt.UserRole)).startswith(("http://", "https://")):
+                QDesktopServices.openUrl(QUrl(it.data(Qt.UserRole)))
                 return
             p = Path(it.data(Qt.UserRole))
             target = p if (p.is_dir() or not folder) else p.parent

@@ -116,7 +116,7 @@ def test_harmonics_tab(window, tmp_path):
     tab.db.on_save()
     t = current_db().table()
     rh = t[t["technique"] == "R(H)"]
-    assert len(rh) == 2 and rh["T"].notna().all()
+    assert len(rh) == 2 and rh["R(H) T (K)"].notna().all()
     assert current_db().curves(int(rh["id"].iloc[0]))
 
 
@@ -188,7 +188,7 @@ def test_database(window, tmp_path):
     t = db.table()
     n0 = len(t)
     assert (t["technique"] == "XRD").sum() == 1
-    assert t["Tc_mid"].dropna().item() == pytest.approx(30.0, abs=0.5)
+    assert t["R(T) Tc_mid (K)"].dropna().item() == pytest.approx(30.0, abs=0.5)
     dbt = window.database
     dbt.reload()
     assert dbt.model.rowCount() == n0
@@ -197,7 +197,7 @@ def test_database(window, tmp_path):
     dbt.cb_tech.setCurrentText("all")
     dbt.add_filter()
     f = dbt.filters[-1]
-    f.cb_col.setCurrentText("Tc_mid")
+    f.cb_col.setCurrentText("R(T) Tc_mid (K)")
     f.cb_op.setCurrentText(">")
     f.ed_val.setText("20")
     dbt.refilter()
@@ -210,7 +210,7 @@ def test_database(window, tmp_path):
     db.set_params("CIO9", {"T_Dep": 720})
     dbt.reload()
     dbt.cb_x.setCurrentText("syn: T_Dep")
-    dbt.cb_y.setCurrentText("Tc_mid")
+    dbt.cb_y.setCurrentText("R(T) Tc_mid (K)")
     dbt.on_scatter()
     dbt.plot.figure.savefig(tmp_path / "db.png")
     # one row per sample
@@ -218,10 +218,10 @@ def test_database(window, tmp_path):
     df = dbt.model.df
     row = df[df["sample"] == "CIO9"].iloc[0]
     assert "XRD" in row["techniques"] and "R(T)" in row["techniques"]
-    assert row["R(T): Tc_mid"] == pytest.approx(30.0, abs=0.5)
-    assert any(c.startswith("XRD: c [") for c in df.columns)
+    assert row["R(T) Tc_mid (K)"] == pytest.approx(30.0, abs=0.5)
+    assert "XRD c mean (Å)" in df.columns
     dbt.cb_x.setCurrentText("syn: T_Dep")
-    dbt.cb_y.setCurrentText("R(T): Tc_mid")
+    dbt.cb_y.setCurrentText("R(T) Tc_mid (K)")
     dbt.on_scatter()
     dbt.view.selectRow(int(df.index[df["sample"] == "CIO9"][0]))
     assert len(dbt.selected()) == row["measurements"]
@@ -240,6 +240,28 @@ def test_database(window, tmp_path):
     tab.on_fit_film()
     assert tab.db._timer.isActive()
     tab.db._timer.stop()
+    # elabFTW dialog and the results that would be appended
+    from evalprog.gui.elab_dialog import ElabTargetDialog
+    rows = tab.db.elab_rows([tab.db_record()])
+    assert rows and rows[0][0] == "c mean"
+    ents = [{"id": 3, "title": "CIO8_STO(001)", "category_title": "Thin Film Growth", "status_title": "Running",
+             "date": "2026-11-01", "fullname": "A", "modified_at": "2026-11-02 10:00:00"},
+            {"id": 12, "title": "CIO9_STO(001)", "category_title": "Thin Film Growth", "status_title": "Success",
+             "date": "2026-11-20", "fullname": "B", "modified_at": "2026-11-21 10:00:00"},
+            {"id": 40, "title": "Termination STO", "category_title": "Sample Preparation", "status_title": "",
+             "date": "2026-11-22", "fullname": "A", "modified_at": "2026-11-22 10:00:00"}]
+    dlg = ElabTargetDialog(None, "XRD: x.xy", "CIO9", None, entries=ents)
+    assert dlg.target() == ("experiments", 12)          # preselected from the sample name
+    dlg.ed_search.setText("termination")
+    assert sum(not dlg.table.isRowHidden(i) for i in range(3)) == 1
+    dlg.ed_search.setText("")
+    dlg.cb_cat_f.setCurrentText("Thin Film Growth")
+    assert sum(not dlg.table.isRowHidden(i) for i in range(3)) == 2
+    dlg.table.sortItems(0)
+    assert dlg.table.item(0, 0).text() == "3"
+    dlg.rb_new.setChecked(True)
+    assert dlg.new_entry()["title"] == "CIO9"
+    dlg.close()
     # one click: raw file back into its tab
     row = t[t["technique"] == "XRD"].to_dict("records")
     window.xrd.scan = None

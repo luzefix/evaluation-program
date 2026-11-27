@@ -6,12 +6,13 @@ from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
-from PySide6.QtWidgets import QCheckBox, QCompleter, QLineEdit, QMessageBox, QPushButton
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QCompleter, QDialog, QDialogButtonBox, QFormLayout,
+                               QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox)
 
 from evalprog.db.naming import guess_sample
 from evalprog.db.store import SAMPLE_TYPES, Database, Measurement, get_db
 
-from .widgets import combo, group, info_label, settings, show_error
+from .widgets import combo, group, hbox, info_label, settings, show_error
 
 
 class _Bus(QObject):
@@ -53,10 +54,11 @@ class SaveToDB:
     """
 
     def __init__(self, technique: str, build: Callable[[], Measurement], parent=None,
-                 name_edit: QLineEdit | None = None):
+                 name_edit: QLineEdit | None = None, figure: Callable | None = None):
         self.technique = technique
         self.build = build
         self.parent = parent
+        self.figure = figure or (lambda: parent.plot.figure)
         self.own_edit = name_edit is None
         self.ed_sample = name_edit or QLineEdit()
         self.ed_sample.setPlaceholderText("e.g. CIO9 (guessed from file name)")
@@ -76,10 +78,15 @@ class SaveToDB:
         self._timer.timeout.connect(lambda: self._save(silent=True))
         self.btn = QPushButton("Save to database")
         self.btn.clicked.connect(self.on_save)
+        self.btn_elab = QPushButton("Append plot to elabFTW entry …")
+        self.btn_elab.setToolTip("Upload the current figure and the main results to the end of an "
+                                 "elabFTW entry (asks before sending)")
+        self.btn_elab.clicked.connect(self.on_elab)
         self.lbl = info_label("")
         rows = [("Sample", self.ed_sample)] if self.own_edit else []
         self.group = group("Database", rows + [("Sample type", self.cb_type), ("Note", self.ed_note),
-                                               self.chk_auto, self.chk_replace, self.btn, self.lbl])
+                                               self.chk_auto, self.chk_replace, self.btn, self.btn_elab,
+                                               self.lbl])
         BUS.changed.connect(self._refresh_completer)
         self._refresh_completer()
 
@@ -183,6 +190,92 @@ class SaveToDB:
                          + (" (new sample)" if new_sample else "") + ".")
         self._on_name()
         changed_soon()
+
+
+    # ------------------------------------------------------------ elabFTW
+    def elab_rows(self, ms) -> list:
+        """(quantity, value, error, unit) of the main results (all results if none is 'main')."""
+        from evalprog.db import columns as cols
+        out = []
+        for m in ms:
+            prefix = f"{m.label}: " if len(ms) > 1 and m.label else ""
+            tech = m.technique or self.technique
+            have = {(r.key, r.label) for r in m.results}
+
+            def per_peak(r):   # single reflection while the mean over reflections exists
+                return bool(r.label) and "(" in r.label and (r.key, r.label.split(" (")[0]) in have
+
+            res = sorted([r for r in m.results if cols.main_rank(tech, r.key, r.label) is not None
+                          and r.value is not None and not per_peak(r)],
+                         key=lambda r: cols.main_rank(tech, r.key, r.label)) \
+                or [r for r in m.results if r.value is not None]
+            for r in res:
+                q = cols.display_key(m.technique or self.technique, r.key)
+                if r.label and "(" in r.label:
+                    q += f" [{r.label}]"
+                out.append((prefix + q, r.value, r.error, r.unit))
+        return out
+
+    def on_elab(self):
+        from evalprog.db import elab
+        if not elab.is_configured():
+            QMessageBox.information(self.parent, "elabFTW", "Set up the elabFTW connection first "
+                                    "(Database tab → elabFTW → Connection …).")
+            return
+        try:
+            ms = self.build()
+        except Exception as exc:
+            QMessageBox.information(self.parent, "elabFTW", str(exc))
+            return
+        ms = ms if isinstance(ms, list) else [ms]
+        from .elab_dialog import ElabTargetDialog
+        cfg = elab.load_config()
+        client = elab.Client(cfg)
+        sample = self.sample()
+        s = current_db().get_sample(sample) if sample else None
+        src = next((Path(m.raw_path).name for m in ms if m.raw_path), "")
+        dlg = ElabTargetDialog(client, f"{self.technique}: {src}" if src else self.technique, sample,
+                               (s or {}).get("elab_id"), self.parent)
+        if not dlg.exec():
+            return
+        import tempfile
+        from PySide6.QtWidgets import QApplication
+        fig_path = None
+        try:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            new = dlg.new_entry()
+            if new:
+                kind, eid = "experiments", client.create_experiment(**new)
+            else:
+                kind, eid = dlg.target()
+            if dlg.chk_fig.isChecked():
+                fig_path = Path(tempfile.gettempdir()) / (re_safe(dlg.ed_title.text().strip()) + ".png")
+                self.figure().savefig(fig_path, dpi=150)
+            rows = self.elab_rows(ms) if dlg.chk_res.isChecked() else []
+            link = elab.append_result(cfg, kind, eid, dlg.ed_title.text().strip(), rows, fig_path,
+                                      dlg.ed_comment.toPlainText().strip(),
+                                      source=", ".join(dict.fromkeys(Path(m.raw_path).name for m in ms
+                                                                     if m.raw_path)), client=client)
+        except Exception as exc:
+            QApplication.restoreOverrideCursor()
+            show_error(self.parent, "elabFTW", exc)
+            return
+        finally:
+            if fig_path is not None:
+                try:
+                    fig_path.unlink()
+                except OSError:
+                    pass
+        QApplication.restoreOverrideCursor()
+        self.lbl.setText(f'Appended to elabFTW: <a href="{link}">{link}</a>')
+        self.lbl.setOpenExternalLinks(True)
+        if dlg.chk_attach.isChecked():
+            self.attach(link, "elabFTW entry")
+
+
+def re_safe(s: str) -> str:
+    import re
+    return re.sub(r"[^\w\-. ()]+", "_", s)[:80] or "figure"
 
 
 def file_date(path) -> str | None:

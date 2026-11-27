@@ -230,6 +230,17 @@ The **Database** tab lists one row per measurement with every result and synthes
 parameter (`syn: ...`) as a column: sort by clicking a header, filter by technique,
 sample type, text or any parameter (`T_Dep > 720`), overlay curves of selected rows
 (normalised, waterfall) and plot any two quantities against each other (e.g. c vs T_Dep).
+By default only the important columns are shown: sample, material, substrate, the key
+synthesis parameters (T_Dep, T_Shutter, deposition volume, ...) and the main results,
+named `<technique> <quantity> (unit)` - e.g. `XRD c mean (Å)` is the corrected lattice
+parameter averaged over all film peaks, `RSM a_ip (Å)` the in-plane lattice parameter
+(averaged over the reflections if several were fitted). *details* adds single peaks,
+fit quality and file info, *Columns ...* chooses and orders the columns (saved).
+
+*Append plot to elabFTW entry ...* (in every analysis tab) uploads the current figure and
+a table of the main results to the end of the main text of an elabFTW entry (the
+sample's entry is preselected). This needs an API key with write access.
+
 *Open selected in analysis tab* loads the raw files of the selected rows back into
 XRD / RSM / R(T) / R(H) / AFM with one click; *Evaluated files* lists and opens all
 recorded output files.
